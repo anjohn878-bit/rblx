@@ -1,0 +1,5 @@
+std = "roblox_min"
+
+[lints]
+shadowing = "allow"
+unused_variable = "warn"

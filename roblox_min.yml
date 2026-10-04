@@ -1,0 +1,26 @@
+---
+base: luau
+name: roblox_min
+globals:
+  game: { any: true }
+  workspace: { any: true }
+  script: { any: true }
+  Enum: { any: true }
+  Instance: { any: true }
+  Vector3: { any: true }
+  Vector2: { any: true }
+  CFrame: { any: true }
+  Color3: { any: true }
+  ColorSequence: { any: true }
+  NumberSequence: { any: true }
+  UDim: { any: true }
+  UDim2: { any: true }
+  PhysicalProperties: { any: true }
+  Random: { any: true }
+  TweenInfo: { any: true }
+  task: { any: true }
+  typeof: { any: true }
+  warn: { any: true }
+  tick: { any: true }
+  RaycastParams: { any: true }
+  DateTime: { any: true }
