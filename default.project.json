@@ -33,6 +33,10 @@
         "Gravity": 196.2
       }
     },
-    "Lighting": {}
+    "Lighting": {
+      "$properties": {
+        "Technology": "Future"
+      }
+    }
   }
 }

@@ -21,7 +21,7 @@ local MapBuilder = {}
 local root: Folder
 
 local COLORS = {
-	Asphalt = Color3.fromRGB(46, 48, 54),
+	Asphalt = Color3.fromRGB(92, 94, 100),
 	Concrete = Color3.fromRGB(150, 150, 146),
 	GrassA = Color3.fromRGB(56, 140, 60),
 	GrassB = Color3.fromRGB(48, 124, 52),
@@ -101,11 +101,11 @@ end
 -- Lighting
 -------------------------------------------------------------------------------
 local function buildLighting()
-	Lighting.ClockTime = 17.4
-	Lighting.Brightness = 2.4
-	Lighting.Ambient = Color3.fromRGB(60, 56, 70)
-	Lighting.OutdoorAmbient = Color3.fromRGB(120, 112, 130)
-	Lighting.EnvironmentDiffuseScale = 0.6
+	Lighting.ClockTime = 16.2
+	Lighting.Brightness = 3
+	Lighting.Ambient = Color3.fromRGB(90, 88, 100)
+	Lighting.OutdoorAmbient = Color3.fromRGB(150, 145, 160)
+	Lighting.EnvironmentDiffuseScale = 1
 	Lighting.EnvironmentSpecularScale = 0.6
 	Lighting.GlobalShadows = true
 	Lighting.ShadowSoftness = 0.25
@@ -120,7 +120,7 @@ local function buildLighting()
 	end
 
 	local atmosphere = Instance.new("Atmosphere")
-	atmosphere.Density = 0.32
+	atmosphere.Density = 0.25
 	atmosphere.Offset = 0.15
 	atmosphere.Color = Color3.fromRGB(255, 196, 160)
 	atmosphere.Decay = Color3.fromRGB(110, 90, 120)
