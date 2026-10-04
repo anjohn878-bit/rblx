@@ -1,0 +1,19 @@
+{
+  "name": "BuildAMarbleRun",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "MarbleRun": {
+        "$path": "src/ReplicatedStorage/MarbleRun"
+      }
+    },
+    "ServerScriptService": {
+      "$path": "src/ServerScriptService"
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "$path": "src/StarterPlayerScripts"
+      }
+    }
+  }
+}
