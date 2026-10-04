@@ -1,0 +1,762 @@
+<roblox version="4"><Item class="Workspace" referent="RBX13"><Properties><string name="Name">Workspace</string></Properties></Item><Item class="ReplicatedStorage" referent="RBX8"><Properties><string name="Name">ReplicatedStorage</string></Properties><Item class="Folder" referent="RBX7"><Properties><string name="Name">Shared</string></Properties><Item class="ModuleScript" referent="RBX6"><Properties><string name="Name">Config</string><ProtectedString name="Source"><![CDATA[-- Shared tuning values for Become a Delivery Driver
+local Config = {}
+
+Config.BasePay = 25
+Config.PayPerStud = 0.35
+Config.SpeedBonusMax = 40 -- extra cash for fast deliveries
+Config.TimeLimitBase = 45 -- seconds
+Config.TimePerStud = 0.12
+Config.StartCash = 0
+
+Config.Ranks = {
+	{ name = "Rookie", deliveries = 0 },
+	{ name = "Courier", deliveries = 5 },
+	{ name = "Driver", deliveries = 20 },
+	{ name = "Pro Driver", deliveries = 50 },
+	{ name = "Road Warrior", deliveries = 100 },
+	{ name = "Delivery Legend", deliveries = 250 },
+}
+
+-- Each tier of a car stat costs more. Index = tier (0 = stock).
+Config.Cars = {
+	{ id = "Scooter", name = "Delivery Scooter", price = 0, speed = 40, torque = 6, color = Color3.fromRGB(255, 170, 0) },
+	{ id = "Hatchback", name = "Hatchback", price = 500, speed = 60, torque = 9, color = Color3.fromRGB(80, 170, 255) },
+	{ id = "Van", name = "Delivery Van", price = 2000, speed = 75, torque = 12, color = Color3.fromRGB(240, 240, 240) },
+	{ id = "Sports", name = "Sports Car", price = 7500, speed = 105, torque = 16, color = Color3.fromRGB(230, 40, 40) },
+	{ id = "Hyper", name = "Hyper Car", price = 25000, speed = 140, torque = 22, color = Color3.fromRGB(170, 60, 255) },
+}
+
+function Config.getRank(deliveries: number): string
+	local rank = Config.Ranks[1].name
+	for _, r in Config.Ranks do
+		if deliveries >= r.deliveries then
+			rank = r.name
+		end
+	end
+	return rank
+end
+
+return Config
+]]></ProtectedString></Properties></Item></Item></Item><Item class="ServerScriptService" referent="RBX5"><Properties><string name="Name">ServerScriptService</string></Properties><Item class="Folder" referent="RBX4"><Properties><string name="Name">Server</string></Properties><Item class="Script" referent="RBX1"><Properties><string name="Name">Main</string><ProtectedString name="Source"><![CDATA[-- Become a Delivery Driver: main server logic
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local DataStoreService = game:GetService("DataStoreService")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local Server = ServerScriptService:WaitForChild("Server")
+local WorldBuilder = require(Server:WaitForChild("WorldBuilder"))
+local CarSpawner = require(Server:WaitForChild("CarSpawner"))
+local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+
+-- Remotes
+local remotes = Instance.new("Folder")
+remotes.Name = "Remotes"
+remotes.Parent = ReplicatedStorage
+local function remote(name: string)
+	local r = Instance.new("RemoteEvent")
+	r.Name = name
+	r.Parent = remotes
+	return r
+end
+local OrderUpdate = remote("OrderUpdate") -- server -> client: {active, house, timeLeft, text}
+local Notify = remote("Notify") -- server -> client: message, color
+local ShopAction = remote("ShopAction") -- client -> server: "buy"/"equip", carId
+local ShopData = remote("ShopData") -- server -> client: owned, equipped
+local SpawnCar = remote("SpawnCar") -- client -> server
+
+local world = WorldBuilder.build()
+
+-- Persistence
+local store
+pcall(function()
+	store = DataStoreService:GetDataStore("DeliveryDriverV1")
+end)
+local profiles: { [Player]: any } = {}
+local orders: { [Player]: any } = {}
+local cars: { [Player]: Model } = {}
+
+local function defaultProfile()
+	return { cash = Config.StartCash, deliveries = 0, earned = 0, owned = { Scooter = true }, equipped = "Scooter" }
+end
+
+local function load(player: Player)
+	local data
+	if store then
+		pcall(function()
+			data = store:GetAsync("p_" .. player.UserId)
+		end)
+	end
+	local p = defaultProfile()
+	if typeof(data) == "table" then
+		for k, v in data do
+			p[k] = v
+		end
+	end
+	profiles[player] = p
+	return p
+end
+
+local function save(player: Player)
+	local p = profiles[player]
+	if store and p then
+		pcall(function()
+			store:SetAsync("p_" .. player.UserId, p)
+		end)
+	end
+end
+
+local function syncStats(player: Player)
+	local p = profiles[player]
+	local ls = player:FindFirstChild("leaderstats")
+	if not p or not ls then
+		return
+	end
+	ls.Cash.Value = p.cash
+	ls.Deliveries.Value = p.deliveries
+	ls.Rank.Value = Config.getRank(p.deliveries)
+	ShopData:FireClient(player, p.owned, p.equipped)
+end
+
+local function setupPlayer(player: Player)
+	local ls = Instance.new("Folder")
+	ls.Name = "leaderstats"
+	ls.Parent = player
+	local cash = Instance.new("IntValue")
+	cash.Name = "Cash"
+	cash.Parent = ls
+	local del = Instance.new("IntValue")
+	del.Name = "Deliveries"
+	del.Parent = ls
+	local rank = Instance.new("StringValue")
+	rank.Name = "Rank"
+	rank.Parent = ls
+	load(player)
+	syncStats(player)
+end
+
+-- Highlight beacon on destination
+local function makeBeacon(door: BasePart, player: Player)
+	local hl = Instance.new("Highlight")
+	hl.FillColor = Color3.fromRGB(80, 255, 120)
+	hl.OutlineColor = Color3.new(1, 1, 1)
+	hl.Parent = door.Parent
+	local beam = Instance.new("Part")
+	beam.Name = "Beacon_" .. player.Name
+	beam.Anchored, beam.CanCollide, beam.CanQuery = true, false, false
+	beam.Material = Enum.Material.Neon
+	beam.Color = Color3.fromRGB(80, 255, 120)
+	beam.Transparency = 0.5
+	beam.Size = Vector3.new(3, 200, 3)
+	beam.Position = door.Position + Vector3.new(0, 100, 0)
+	beam.Parent = workspace
+	return function()
+		hl:Destroy()
+		beam:Destroy()
+	end
+end
+
+local function clearOrder(player: Player)
+	local o = orders[player]
+	if o then
+		o.cleanup()
+		o.door:FindFirstChildOfClass("ProximityPrompt").Enabled = false
+		orders[player] = nil
+	end
+	OrderUpdate:FireClient(player, { active = false })
+end
+
+local rng = Random.new()
+local houseDoors = {}
+for _, h in world.Houses:GetChildren() do
+	table.insert(houseDoors, h:FindFirstChild("Door"))
+end
+
+local function startOrder(player: Player)
+	if orders[player] then
+		Notify:FireClient(player, "Finish your current delivery first!", Color3.fromRGB(255, 120, 120))
+		return
+	end
+	local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return
+	end
+	local door = houseDoors[rng:NextInteger(1, #houseDoors)]
+	local dist = (door.Position - world.PickupPrompt.Parent.Position).Magnitude
+	local limit = Config.TimeLimitBase + dist * Config.TimePerStud
+	local prompt = door:FindFirstChildOfClass("ProximityPrompt")
+	prompt.Enabled = true
+	orders[player] = {
+		door = door,
+		dist = dist,
+		limit = limit,
+		started = os.clock(),
+		cleanup = makeBeacon(door, player),
+	}
+	-- delivered by anyone triggering; only valid for order owner
+	Notify:FireClient(player, "Order picked up! Deliver it to the green house.", Color3.fromRGB(120, 255, 160))
+
+	task.spawn(function()
+		local o = orders[player]
+		while orders[player] == o and player.Parent do
+			local left = o.limit - (os.clock() - o.started)
+			OrderUpdate:FireClient(player, { active = true, timeLeft = math.max(left, 0), target = door.Position })
+			if left <= -10 then
+				-- hard fail: tips gone, order expires
+				clearOrder(player)
+				Notify:FireClient(player, "Order expired! No pay.", Color3.fromRGB(255, 90, 90))
+				return
+			end
+			task.wait(0.25)
+		end
+	end)
+end
+
+local function completeOrder(player: Player, door: BasePart)
+	local o = orders[player]
+	if not o or o.door ~= door then
+		return
+	end
+	local p = profiles[player]
+	local elapsed = os.clock() - o.started
+	local pay = Config.BasePay + o.dist * Config.PayPerStud
+	local bonus = 0
+	if elapsed < o.limit then
+		bonus = math.floor(Config.SpeedBonusMax * (1 - elapsed / o.limit))
+	else
+		pay *= 0.5 -- late
+	end
+	local total = math.floor(pay + bonus)
+	p.cash += total
+	p.earned += total
+	p.deliveries += 1
+	clearOrder(player)
+	syncStats(player)
+	Notify:FireClient(
+		player,
+		("Delivered! +$%d%s"):format(total, bonus > 0 and (" (speed bonus $%d)"):format(bonus) or " (late)"),
+		Color3.fromRGB(255, 230, 90)
+	)
+end
+
+for _, door in houseDoors do
+	local prompt = door:FindFirstChildOfClass("ProximityPrompt")
+	prompt.Triggered:Connect(function(player)
+		completeOrder(player, door)
+	end)
+end
+
+world.PickupPrompt.Triggered:Connect(startOrder)
+
+-- Shop / cars
+local function findCar(id: string)
+	for _, c in Config.Cars do
+		if c.id == id then
+			return c
+		end
+	end
+end
+
+ShopAction.OnServerEvent:Connect(function(player, action, carId)
+	local p = profiles[player]
+	local def = typeof(carId) == "string" and findCar(carId)
+	if not p or not def then
+		return
+	end
+	if action == "buy" then
+		if p.owned[carId] then
+			return
+		end
+		if p.cash < def.price then
+			Notify:FireClient(player, "Not enough cash!", Color3.fromRGB(255, 90, 90))
+			return
+		end
+		p.cash -= def.price
+		p.owned[carId] = true
+		p.equipped = carId
+		Notify:FireClient(player, "Bought " .. def.name .. "!", Color3.fromRGB(120, 255, 160))
+	elseif action == "equip" and p.owned[carId] then
+		p.equipped = carId
+	end
+	syncStats(player)
+end)
+
+SpawnCar.OnServerEvent:Connect(function(player)
+	local p = profiles[player]
+	local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if not p or not root then
+		return
+	end
+	if cars[player] then
+		cars[player]:Destroy()
+	end
+	local cf = CFrame.new(root.Position + root.CFrame.LookVector * 12 + Vector3.new(0, 3, 0)) * CFrame.Angles(0, math.atan2(-root.CFrame.LookVector.X, -root.CFrame.LookVector.Z), 0)
+	local model, seat = CarSpawner.spawn(p.equipped, cf, player)
+	cars[player] = model
+end)
+
+world.ShopPrompt.Triggered:Connect(function(player)
+	ShopData:FireClient(player, profiles[player].owned, profiles[player].equipped, true)
+end)
+
+Players.PlayerAdded:Connect(setupPlayer)
+for _, pl in Players:GetPlayers() do
+	task.spawn(setupPlayer, pl)
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	clearOrder(player)
+	if cars[player] then
+		cars[player]:Destroy()
+		cars[player] = nil
+	end
+	save(player)
+	profiles[player] = nil
+end)
+
+game:BindToClose(function()
+	for _, pl in Players:GetPlayers() do
+		save(pl)
+	end
+end)
+
+-- autosave
+task.spawn(function()
+	while true do
+		task.wait(120)
+		for _, pl in Players:GetPlayers() do
+			save(pl)
+		end
+	end
+end)
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX2"><Properties><string name="Name">WorldBuilder</string><ProtectedString name="Source"><![CDATA[-- Procedurally builds the town: ground, roads, restaurant, houses.
+local Workspace = game:GetService("Workspace")
+
+local WorldBuilder = {}
+
+local GRID = 4 -- blocks per side
+local BLOCK = 120
+local ROAD = 30
+local STRIDE = BLOCK + ROAD
+
+local function part(parent: Instance, name: string, size: Vector3, pos: Vector3, color: Color3, material: Enum.Material?)
+	local p = Instance.new("Part")
+	p.Name = name
+	p.Size = size
+	p.Position = pos
+	p.Color = color
+	p.Material = material or Enum.Material.SmoothPlastic
+	p.Anchored = true
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.Parent = parent
+	return p
+end
+
+local function makeHouse(parent: Folder, pos: Vector3, index: number, rng: Random)
+	local model = Instance.new("Model")
+	model.Name = "House" .. index
+	local wallColor = Color3.fromHSV(rng:NextNumber(), 0.25, 0.95)
+	local w, d = rng:NextInteger(18, 26), rng:NextInteger(18, 26)
+	part(model, "Walls", Vector3.new(w, 12, d), pos + Vector3.new(0, 6, 0), wallColor)
+	local roof = part(model, "Roof", Vector3.new(w + 3, 2, d + 3), pos + Vector3.new(0, 13, 0), Color3.fromRGB(120, 50, 40), Enum.Material.Slate)
+	roof.Name = "Roof"
+	local door = part(model, "Door", Vector3.new(5, 8, 1), pos + Vector3.new(0, 4, d / 2 + 0.5), Color3.fromRGB(90, 60, 40), Enum.Material.Wood)
+	model.PrimaryPart = model:FindFirstChild("Walls") :: BasePart
+
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "DeliverPrompt"
+	prompt.ActionText = "Deliver Package"
+	prompt.ObjectText = "House " .. index
+	prompt.HoldDuration = 0.4
+	prompt.MaxActivationDistance = 14
+	prompt.Enabled = false
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = door
+	model.Parent = parent
+	return model, door, prompt
+end
+
+function WorldBuilder.build()
+	local world = Instance.new("Folder")
+	world.Name = "World"
+	world.Parent = Workspace
+
+	for _, c in Workspace:GetChildren() do
+		if c.Name == "Baseplate" then
+			c:Destroy()
+		end
+	end
+
+	local total = GRID * STRIDE + ROAD
+	local center = Vector3.new(0, 0, 0)
+	part(world, "Ground", Vector3.new(total + 400, 2, total + 400), center + Vector3.new(0, -1, 0), Color3.fromRGB(88, 140, 70), Enum.Material.Grass)
+
+	local origin = -total / 2
+	-- roads
+	for i = 0, GRID do
+		local offset = origin + ROAD / 2 + i * STRIDE
+		part(world, "RoadX", Vector3.new(total, 0.4, ROAD), Vector3.new(0, 0.2, offset), Color3.fromRGB(45, 45, 50), Enum.Material.Asphalt)
+		part(world, "RoadZ", Vector3.new(ROAD, 0.4, total), Vector3.new(offset, 0.25, 0), Color3.fromRGB(45, 45, 50), Enum.Material.Asphalt)
+		part(world, "LineX", Vector3.new(total, 0.1, 0.8), Vector3.new(0, 0.5, offset), Color3.fromRGB(240, 220, 90))
+		part(world, "LineZ", Vector3.new(0.8, 0.1, total), Vector3.new(offset, 0.55, 0), Color3.fromRGB(240, 220, 90))
+	end
+
+	-- city blocks: sidewalks + houses (block 1,1 is the restaurant block)
+	local houses = Instance.new("Folder")
+	houses.Name = "Houses"
+	houses.Parent = world
+	local rng = Random.new(1337)
+	local count = 0
+	local restaurantPos
+	for gx = 1, GRID do
+		for gz = 1, GRID do
+			local cx = origin + ROAD + (gx - 1) * STRIDE + BLOCK / 2
+			local cz = origin + ROAD + (gz - 1) * STRIDE + BLOCK / 2
+			part(world, "Sidewalk", Vector3.new(BLOCK, 0.8, BLOCK), Vector3.new(cx, 0.4, cz), Color3.fromRGB(190, 190, 190), Enum.Material.Concrete)
+			if gx == 1 and gz == 1 then
+				restaurantPos = Vector3.new(cx, 0.8, cz)
+			else
+				-- four houses facing +Z, arranged in a 2x2 inside the block
+				for hx = -1, 1, 2 do
+					for hz = -1, 1, 2 do
+						count += 1
+						local pos = Vector3.new(cx + hx * 28, 0.8, cz + hz * 28)
+						makeHouse(houses, pos, count, rng)
+					end
+				end
+			end
+		end
+	end
+
+	-- restaurant
+	local rest = Instance.new("Model")
+	rest.Name = "Restaurant"
+	part(rest, "Building", Vector3.new(60, 18, 50), restaurantPos + Vector3.new(0, 9, 0), Color3.fromRGB(220, 60, 50))
+	part(rest, "Awning", Vector3.new(62, 2, 12), restaurantPos + Vector3.new(0, 14, 30), Color3.fromRGB(255, 255, 255))
+	local counter = part(rest, "PickupCounter", Vector3.new(12, 4, 4), restaurantPos + Vector3.new(0, 2, 28), Color3.fromRGB(255, 200, 80), Enum.Material.Wood)
+	local sign = part(rest, "Sign", Vector3.new(36, 6, 1), restaurantPos + Vector3.new(0, 21, 25), Color3.fromRGB(30, 30, 30))
+	local gui = Instance.new("SurfaceGui")
+	gui.Face = Enum.NormalId.Front
+	gui.Parent = sign
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Text = "BURGER BARN"
+	label.TextScaled = true
+	label.Font = Enum.Font.FredokaOne
+	label.TextColor3 = Color3.fromRGB(255, 220, 60)
+	label.Parent = gui
+
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "PickupPrompt"
+	prompt.ActionText = "Pick Up Order"
+	prompt.ObjectText = "Burger Barn"
+	prompt.HoldDuration = 0.5
+	prompt.MaxActivationDistance = 14
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = counter
+	rest.PrimaryPart = rest:FindFirstChild("Building") :: BasePart
+	rest.Parent = world
+
+	-- spawn + car dealer
+	local spawn = Instance.new("SpawnLocation")
+	spawn.Name = "Spawn"
+	spawn.Size = Vector3.new(14, 1, 14)
+	spawn.Position = restaurantPos + Vector3.new(0, 0.5, 55)
+	spawn.Anchored = true
+	spawn.Neutral = true
+	spawn.Material = Enum.Material.Neon
+	spawn.Color = Color3.fromRGB(255, 200, 60)
+	spawn.Parent = world
+
+	local garage = part(world, "GarageStand", Vector3.new(10, 1, 10), restaurantPos + Vector3.new(30, 1.3, 55), Color3.fromRGB(50, 120, 255), Enum.Material.Neon)
+	local shopPrompt = Instance.new("ProximityPrompt")
+	shopPrompt.Name = "ShopPrompt"
+	shopPrompt.ActionText = "Open Car Shop"
+	shopPrompt.ObjectText = "Garage"
+	shopPrompt.HoldDuration = 0
+	shopPrompt.MaxActivationDistance = 12
+	shopPrompt.Parent = garage
+
+	return {
+		Houses = houses,
+		Restaurant = rest,
+		PickupPrompt = prompt,
+		ShopPrompt = shopPrompt,
+		Spawn = spawn,
+		CarSpawn = restaurantPos + Vector3.new(15, 3, 70),
+	}
+end
+
+return WorldBuilder
+]]></ProtectedString></Properties></Item><Item class="ModuleScript" referent="RBX3"><Properties><string name="Name">CarSpawner</string><ProtectedString name="Source"><![CDATA[-- Builds a simple drivable car from parts + a VehicleSeat.
+local Config = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("Config"))
+
+local CarSpawner = {}
+
+local function weld(a: BasePart, b: BasePart)
+	local w = Instance.new("WeldConstraint")
+	w.Part0, w.Part1 = a, b
+	w.Parent = a
+end
+
+function CarSpawner.spawn(carId: string, cframe: CFrame, owner: Player)
+	local def
+	for _, c in Config.Cars do
+		if c.id == carId then
+			def = c
+		end
+	end
+	def = def or Config.Cars[1]
+
+	local model = Instance.new("Model")
+	model.Name = owner.Name .. "_Car"
+
+	local seat = Instance.new("VehicleSeat")
+	seat.Size = Vector3.new(6, 1.2, 12)
+	seat.MaxSpeed = def.speed
+	seat.Torque = def.torque * 1000
+	seat.TurnSpeed = 1.5
+	seat.HeadsUpDisplay = false
+	seat.Color = def.color
+	seat.CFrame = cframe
+	seat.Parent = model
+	model.PrimaryPart = seat
+
+	local top = Instance.new("Part")
+	top.Name = "Cabin"
+	top.Size = Vector3.new(5.6, 3, 6)
+	top.Color = def.color
+	top.Material = Enum.Material.SmoothPlastic
+	top.CFrame = cframe * CFrame.new(0, 2.1, 1.5)
+	top.Parent = model
+	weld(seat, top)
+
+	local glass = Instance.new("Part")
+	glass.Name = "Windshield"
+	glass.Size = Vector3.new(5.2, 2, 0.4)
+	glass.Color = Color3.fromRGB(150, 200, 255)
+	glass.Transparency = 0.4
+	glass.CFrame = cframe * CFrame.new(0, 2.3, -1.6)
+	glass.CanCollide = false
+	glass.Parent = model
+	weld(seat, glass)
+
+	-- wheels (slippery cylinders, don't collide with ground much: seat does the driving)
+	for _, off in { Vector3.new(-3.2, -0.6, -4), Vector3.new(3.2, -0.6, -4), Vector3.new(-3.2, -0.6, 4), Vector3.new(3.2, -0.6, 4) } do
+		local wheel = Instance.new("Part")
+		wheel.Name = "Wheel"
+		wheel.Shape = Enum.PartType.Cylinder
+		wheel.Size = Vector3.new(1.2, 3, 3)
+		wheel.Color = Color3.fromRGB(25, 25, 25)
+		wheel.CustomPhysicalProperties = PhysicalProperties.new(0.5, 0.05, 0, 1, 1)
+		wheel.CFrame = cframe * CFrame.new(off) * CFrame.Angles(0, 0, math.rad(90))
+		wheel.Parent = model
+		weld(seat, wheel)
+	end
+
+	model:SetAttribute("Owner", owner.UserId)
+	model.Parent = workspace
+	pcall(function()
+		seat:SetNetworkOwner(owner)
+	end)
+	return model, seat
+end
+
+return CarSpawner
+]]></ProtectedString></Properties></Item></Item></Item><Item class="StarterPlayer" referent="RBX12"><Properties><string name="Name">StarterPlayer</string></Properties><Item class="StarterPlayerScripts" referent="RBX11"><Properties><string name="Name">StarterPlayerScripts</string></Properties><Item class="Folder" referent="RBX10"><Properties><string name="Name">Client</string></Properties><Item class="LocalScript" referent="RBX9"><Properties><string name="Name">Hud</string><ProtectedString name="Source"><![CDATA[-- HUD, order tracker, car shop UI, notifications
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+local remotes = ReplicatedStorage:WaitForChild("Remotes")
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "DeliveryHud"
+gui.ResetOnSpawn = false
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local function label(parent, size, pos, text, textSize)
+	local l = Instance.new("TextLabel")
+	l.Size, l.Position = size, pos
+	l.BackgroundTransparency = 1
+	l.Text = text
+	l.Font = Enum.Font.FredokaOne
+	l.TextSize = textSize or 22
+	l.TextColor3 = Color3.new(1, 1, 1)
+	l.TextStrokeTransparency = 0.5
+	l.Parent = parent
+	return l
+end
+local function corner(i, r)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, r or 10)
+	c.Parent = i
+end
+
+-- Objective panel
+local panel = Instance.new("Frame")
+panel.Size = UDim2.fromOffset(300, 90)
+panel.Position = UDim2.new(0.5, -150, 0, 12)
+panel.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+panel.BackgroundTransparency = 0.25
+panel.Parent = gui
+corner(panel)
+local title = label(panel, UDim2.new(1, 0, 0, 34), UDim2.fromOffset(0, 6), "Go to Burger Barn for an order!", 18)
+title.TextWrapped = true
+local timer = label(panel, UDim2.new(1, 0, 0, 26), UDim2.fromOffset(0, 40), "", 24)
+local distLabel = label(panel, UDim2.new(1, 0, 0, 20), UDim2.fromOffset(0, 66), "", 16)
+
+-- Stats
+local stats = label(gui, UDim2.fromOffset(280, 30), UDim2.new(0, 12, 1, -42), "", 22)
+stats.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Toast
+local toast = label(gui, UDim2.new(1, 0, 0, 40), UDim2.new(0, 0, 0.25, 0), "", 30)
+toast.TextTransparency = 1
+toast.TextStrokeTransparency = 1
+local toastId = 0
+remotes.Notify.OnClientEvent:Connect(function(msg, color)
+	toastId += 1
+	local id = toastId
+	toast.Text = msg
+	toast.TextColor3 = color or Color3.new(1, 1, 1)
+	toast.TextTransparency = 0
+	toast.TextStrokeTransparency = 0.4
+	task.delay(3, function()
+		if toastId == id then
+			toast.TextTransparency = 1
+			toast.TextStrokeTransparency = 1
+		end
+	end)
+end)
+
+-- Order tracking
+local target: Vector3? = nil
+remotes.OrderUpdate.OnClientEvent:Connect(function(info)
+	if info.active then
+		target = info.target
+		title.Text = "Deliver to the GREEN house!"
+		timer.Text = ("%ds"):format(math.ceil(info.timeLeft))
+		timer.TextColor3 = info.timeLeft > 10 and Color3.new(1, 1, 1) or Color3.fromRGB(255, 90, 90)
+	else
+		target = nil
+		title.Text = "Go to Burger Barn for an order!"
+		timer.Text, distLabel.Text = "", ""
+	end
+end)
+
+RunService.RenderStepped:Connect(function()
+	local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	if target and root then
+		distLabel.Text = ("%d studs away"):format((root.Position - target).Magnitude)
+	end
+	local ls = player:FindFirstChild("leaderstats")
+	if ls and ls:FindFirstChild("Cash") then
+		stats.Text = ("$%d  |  %s"):format(ls.Cash.Value, ls.Rank.Value)
+	end
+end)
+
+-- Spawn car button
+local carBtn = Instance.new("TextButton")
+carBtn.Size = UDim2.fromOffset(150, 44)
+carBtn.Position = UDim2.new(1, -162, 1, -56)
+carBtn.Text = "Spawn Car"
+carBtn.Font = Enum.Font.FredokaOne
+carBtn.TextSize = 22
+carBtn.TextColor3 = Color3.new(1, 1, 1)
+carBtn.BackgroundColor3 = Color3.fromRGB(60, 160, 80)
+carBtn.Parent = gui
+corner(carBtn)
+carBtn.Activated:Connect(function()
+	remotes.SpawnCar:FireServer()
+end)
+
+-- Shop
+local shop = Instance.new("Frame")
+shop.Size = UDim2.fromOffset(420, 360)
+shop.Position = UDim2.new(0.5, -210, 0.5, -180)
+shop.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+shop.Visible = false
+shop.Parent = gui
+corner(shop, 14)
+label(shop, UDim2.new(1, 0, 0, 40), UDim2.fromOffset(0, 6), "CAR SHOP", 28)
+local close = Instance.new("TextButton")
+close.Size = UDim2.fromOffset(32, 32)
+close.Position = UDim2.new(1, -40, 0, 8)
+close.Text = "X"
+close.Font = Enum.Font.FredokaOne
+close.TextSize = 20
+close.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+close.TextColor3 = Color3.new(1, 1, 1)
+close.Parent = shop
+corner(close, 8)
+close.Activated:Connect(function()
+	shop.Visible = false
+end)
+
+local list = Instance.new("Frame")
+list.Size = UDim2.new(1, -24, 1, -60)
+list.Position = UDim2.fromOffset(12, 52)
+list.BackgroundTransparency = 1
+list.Parent = shop
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 6)
+layout.Parent = list
+
+local rows = {}
+for _, car in Config.Cars do
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, 0, 0, 52)
+	row.BackgroundColor3 = Color3.fromRGB(45, 45, 56)
+	row.Parent = list
+	corner(row, 8)
+	local swatch = Instance.new("Frame")
+	swatch.Size = UDim2.fromOffset(10, 52)
+	swatch.BackgroundColor3 = car.color
+	swatch.BorderSizePixel = 0
+	swatch.Parent = row
+	corner(swatch, 5)
+	local name = label(row, UDim2.fromOffset(220, 26), UDim2.fromOffset(18, 2), car.name, 20)
+	name.TextXAlignment = Enum.TextXAlignment.Left
+	local sub = label(row, UDim2.fromOffset(220, 20), UDim2.fromOffset(18, 28), ("Speed %d  Power %d"):format(car.speed, car.torque), 14)
+	sub.TextXAlignment = Enum.TextXAlignment.Left
+	sub.TextColor3 = Color3.fromRGB(190, 190, 200)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.fromOffset(120, 36)
+	btn.Position = UDim2.new(1, -128, 0, 8)
+	btn.Font = Enum.Font.FredokaOne
+	btn.TextSize = 18
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.Parent = row
+	corner(btn, 8)
+	rows[car.id] = btn
+	btn.Activated:Connect(function()
+		local action = btn:GetAttribute("Action")
+		if action then
+			remotes.ShopAction:FireServer(action, car.id)
+		end
+	end)
+end
+
+remotes.ShopData.OnClientEvent:Connect(function(owned, equipped, open)
+	for _, car in Config.Cars do
+		local btn = rows[car.id]
+		if equipped == car.id then
+			btn.Text, btn.BackgroundColor3 = "Equipped", Color3.fromRGB(90, 90, 100)
+			btn:SetAttribute("Action", nil)
+		elseif owned[car.id] then
+			btn.Text, btn.BackgroundColor3 = "Equip", Color3.fromRGB(60, 120, 220)
+			btn:SetAttribute("Action", "equip")
+		else
+			btn.Text, btn.BackgroundColor3 = "$" .. car.price, Color3.fromRGB(60, 160, 80)
+			btn:SetAttribute("Action", "buy")
+		end
+	end
+	if open then
+		shop.Visible = true
+	end
+end)
+]]></ProtectedString></Properties></Item></Item></Item></Item><Item class="Lighting" referent="RBX14"><Properties><string name="Name">Lighting</string></Properties></Item><Item class="Players" referent="RBX15"><Properties><string name="Name">Players</string></Properties></Item></roblox>
