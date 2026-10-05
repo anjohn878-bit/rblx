@@ -1,0 +1,5780 @@
+<roblox version="4">
+  <Item class="ReplicatedStorage" referent="0">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="Folder" referent="1">
+      <Properties>
+        <string name="Name">Shared</string>
+      </Properties>
+      <Item class="ModuleScript" referent="2">
+        <Properties>
+          <string name="Name">BirdFlight</string>
+          <string name="Source"><![CDATA[--!strict
+-- Deterministic bird motion. A visit is fully described by a few numbers and a
+-- start time, so every client can compute exactly where a bird is at any moment
+-- (including clients that join mid-visit) with no per-frame network traffic.
+
+local Types = require(script.Parent.Types)
+type VisitInfo = Types.VisitInfo
+
+local BirdFlight = {}
+
+export type Sample = {
+	position: Vector3,
+	look: Vector3, -- unit vector the bird faces
+	phase: "arrive" | "perch" | "leave" | "done",
+	flap: number, -- 0 = wings folded, 1 = flapping hard
+}
+
+local UP = Vector3.new(0, 1, 0)
+
+local function rotateY(v: Vector3, angle: number): Vector3
+	local c, s = math.cos(angle), math.sin(angle)
+	return Vector3.new(v.X * c + v.Z * s, v.Y, -v.X * s + v.Z * c)
+end
+
+local function bezier(p0: Vector3, c: Vector3, p1: Vector3, s: number): Vector3
+	local a = 1 - s
+	return p0 * (a * a) + c * (2 * a * s) + p1 * (s * s)
+end
+
+local function bezierDirection(p0: Vector3, c: Vector3, p1: Vector3, s: number, fallback: Vector3): Vector3
+	local d = (c - p0) * (2 * (1 - s)) + (p1 - c) * (2 * s)
+	if d.Magnitude < 1e-4 then
+		return fallback
+	end
+	return d.Unit
+end
+
+-- Blend two unit directions. A plain Lerp shrinks the vector (and hits zero for
+-- opposite directions), which would hand CFrame.lookAt a degenerate input.
+local function blend(a: Vector3, b: Vector3, t: number): Vector3
+	local v = a:Lerp(b, t)
+	if v.Magnitude < 1e-3 then
+		return b
+	end
+	return v.Unit
+end
+
+function BirdFlight.duration(visit: VisitInfo): number
+	return visit.arrive + visit.stay + visit.leave
+end
+
+function BirdFlight.sample(visit: VisitInfo, t: number): Sample
+	local perch = visit.perch
+	local facing = visit.facing
+
+	if t < visit.arrive then
+		-- Swoop in and brake onto the perch.
+		local u = math.clamp(t / visit.arrive, 0, 1)
+		local s = 1 - (1 - u) * (1 - u)
+		local control = perch + (visit.from - perch) * 0.4 + UP * 3.5
+		local dir = bezierDirection(visit.from, control, perch, s, facing)
+		local turn = math.clamp((u - 0.7) / 0.3, 0, 1)
+		return {
+			position = bezier(visit.from, control, perch, s),
+			look = blend(dir, facing, turn),
+			phase = "arrive",
+			flap = 1,
+		}
+	end
+
+	local sinceLanding = t - visit.arrive
+	if sinceLanding < visit.stay then
+		-- Perched: hop a little and glance around.
+		local hop = math.max(0, math.sin(sinceLanding * 3.1 + visit.seed)) ^ 6 * 0.12
+		local glance = math.sin(sinceLanding * 0.7 + visit.seed * 1.7) * 0.55
+		return {
+			position = perch + UP * hop,
+			look = rotateY(facing, glance),
+			phase = "perch",
+			flap = 0,
+		}
+	end
+
+	local u = math.clamp((sinceLanding - visit.stay) / visit.leave, 0, 1)
+	if u >= 1 then
+		return { position = visit.to, look = (visit.to - perch).Unit, phase = "done", flap = 1 }
+	end
+	-- Take off, accelerating away.
+	local s = u * u
+	local control = perch + UP * 6 + (visit.to - perch) * 0.2
+	local dir = bezierDirection(perch, control, visit.to, s, facing)
+	local turn = math.clamp(u / 0.2, 0, 1)
+	return {
+		position = bezier(perch, control, visit.to, s),
+		look = blend(facing, dir, turn),
+		phase = "leave",
+		flap = 1,
+	}
+end
+
+-- Builds the geometry for a visit: where the bird comes from, which way it
+-- faces on the perch, and where it exits to.
+function BirdFlight.plan(perch: Vector3, rng: Random)
+	local inAngle = rng:NextNumber(0, math.pi * 2)
+	local inDir = Vector3.new(math.cos(inAngle), 0, math.sin(inAngle))
+	local outAngle = inAngle + math.pi + rng:NextNumber(-1.1, 1.1)
+	local outDir = Vector3.new(math.cos(outAngle), 0, math.sin(outAngle))
+	local faceAngle = rng:NextNumber(0, math.pi * 2)
+	return {
+		from = perch + inDir * rng:NextNumber(55, 80) + UP * rng:NextNumber(18, 30),
+		to = perch + outDir * rng:NextNumber(60, 90) + UP * rng:NextNumber(22, 38),
+		facing = Vector3.new(math.cos(faceAngle), 0, math.sin(faceAngle)),
+		seed = rng:NextNumber(0, 100),
+	}
+end
+
+return BirdFlight
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
+          <string name="Name">BirdModel</string>
+          <string name="Source"><![CDATA[--!strict
+-- Builds a bird from primitive parts and exposes a small "rig" so a renderer can
+-- pose it every frame (flapping wings) without welds or physics.
+-- Local space: the bird faces -Z, up is +Y, and its feet are at the origin.
+
+local Birds = require(script.Parent.Birds)
+local Types = require(script.Parent.Types)
+type BirdDef = Types.BirdDef
+
+local BirdModel = {}
+
+export type Wing = { index: number, shoulder: CFrame, offset: CFrame, side: number }
+
+export type Rig = {
+	model: Model,
+	parts: { BasePart },
+	rest: { CFrame }, -- local CFrame of each part when wings are folded
+	static: { number }, -- indices of parts that never move relative to the body
+	wings: { Wing },
+	flapRate: number, -- radians/second of the wing beat
+	height: number, -- studs from feet to the top of the head
+	def: BirdDef,
+}
+
+local PLASTIC = Enum.Material.SmoothPlastic
+local SILHOUETTE = Color3.fromRGB(16, 16, 22)
+local EYE = Color3.fromRGB(20, 20, 26)
+local WHITE = Color3.fromRGB(245, 246, 252)
+
+function BirdModel.build(def: BirdDef, silhouette: boolean?): Rig
+	local s = def.scale
+	local model = Instance.new("Model")
+	model.Name = def.id
+
+	local parts: { BasePart } = {}
+	local rest: { CFrame } = {}
+	local static: { number } = {}
+	local wings: { Wing } = {}
+	local glow = Birds.hasTrait(def, "Glow")
+
+	local function add(
+		name: string,
+		size: Vector3,
+		cf: CFrame,
+		color: Color3,
+		material: Enum.Material?,
+		round: boolean
+	): Part
+		local p = Instance.new("Part")
+		p.Name = name
+		p.Size = size * s
+		p.Color = if silhouette then SILHOUETTE else color
+		p.Material = if silhouette then PLASTIC else (material or PLASTIC)
+		p.Anchored = true
+		p.CanCollide = false
+		p.CanTouch = false
+		p.CanQuery = false
+		p.CastShadow = false
+		p.TopSurface = Enum.SurfaceType.Smooth
+		p.BottomSurface = Enum.SurfaceType.Smooth
+		-- positions are authored at scale 1 and scaled here
+		local scaled = cf.Rotation + cf.Position * s
+		p.CFrame = scaled
+		if round then
+			local mesh = Instance.new("SpecialMesh")
+			mesh.MeshType = Enum.MeshType.Sphere
+			mesh.Parent = p
+		end
+		p.Parent = model
+		table.insert(parts, p)
+		table.insert(rest, scaled)
+		return p
+	end
+	local function addStatic(
+		name: string,
+		size: Vector3,
+		cf: CFrame,
+		color: Color3,
+		material: Enum.Material?,
+		round: boolean
+	): Part
+		local p = add(name, size, cf, color, material, round)
+		table.insert(static, #parts)
+		return p
+	end
+
+	-- invisible root so the model has a pivot at the feet
+	local root = addStatic("Root", Vector3.new(0.2, 0.2, 0.2) / s, CFrame.new(), WHITE, PLASTIC, false)
+	root.Transparency = 1
+	model.PrimaryPart = root
+
+	local wingMaterial = if glow then Enum.Material.Neon else PLASTIC
+	local bellyMaterial = if glow then Enum.Material.Neon else PLASTIC
+
+	-- legs
+	for _, x in { -0.17, 0.17 } do
+		addStatic("Leg", Vector3.new(0.09, 0.42, 0.09), CFrame.new(x, 0.21, 0), def.beak, PLASTIC, false)
+	end
+
+	-- body, belly, head
+	local body = addStatic("Body", Vector3.new(0.95, 0.85, 1.4), CFrame.new(0, 0.8, 0.05), def.body, PLASTIC, true)
+	addStatic("Belly", Vector3.new(0.8, 0.55, 1.05), CFrame.new(0, 0.64, -0.12), def.belly, bellyMaterial, true)
+	addStatic("Head", Vector3.new(0.66, 0.66, 0.66), CFrame.new(0, 1.4, -0.5), def.body, PLASTIC, true)
+
+	local owl = Birds.hasTrait(def, "OwlFace")
+
+	-- beak
+	if Birds.hasTrait(def, "BigBeak") then
+		addStatic("Beak", Vector3.new(0.26, 0.24, 0.8), CFrame.new(0, 1.34, -1.0), def.beak, PLASTIC, false)
+		addStatic(
+			"BeakTip",
+			Vector3.new(0.24, 0.22, 0.18),
+			CFrame.new(0, 1.34, -1.36),
+			Color3.fromRGB(30, 30, 34),
+			PLASTIC,
+			false
+		)
+	elseif Birds.hasTrait(def, "LongBeak") then
+		addStatic("Beak", Vector3.new(0.07, 0.07, 0.95), CFrame.new(0, 1.37, -1.15), def.beak, PLASTIC, false)
+	elseif owl then
+		addStatic("Beak", Vector3.new(0.1, 0.16, 0.18), CFrame.new(0, 1.3, -0.84), def.beak, PLASTIC, false)
+	else
+		addStatic("Beak", Vector3.new(0.16, 0.14, 0.36), CFrame.new(0, 1.35, -0.88), def.beak, PLASTIC, false)
+	end
+
+	-- eyes
+	if owl then
+		for _, x in { -0.17, 0.17 } do
+			addStatic("EyeDisc", Vector3.new(0.34, 0.34, 0.1), CFrame.new(x, 1.44, -0.79), WHITE, PLASTIC, true)
+			addStatic(
+				"Eye",
+				Vector3.new(0.18, 0.18, 0.1),
+				CFrame.new(x, 1.44, -0.84),
+				def.accent,
+				Enum.Material.Neon,
+				true
+			)
+		end
+		for _, side in { -1, 1 } do
+			addStatic(
+				"Tuft",
+				Vector3.new(0.1, 0.3, 0.1),
+				CFrame.new(side * 0.22, 1.78, -0.5) * CFrame.Angles(0, 0, side * -0.35),
+				def.wing,
+				PLASTIC,
+				false
+			)
+		end
+	else
+		for _, x in { -0.2, 0.2 } do
+			addStatic("Eye", Vector3.new(0.12, 0.12, 0.12), CFrame.new(x, 1.47, -0.78), EYE, PLASTIC, true)
+		end
+	end
+
+	-- head decorations
+	if Birds.hasTrait(def, "Crest") then
+		addStatic(
+			"Crest",
+			Vector3.new(0.14, 0.5, 0.36),
+			CFrame.new(0, 1.78, -0.42) * CFrame.Angles(math.rad(-28), 0, 0),
+			def.accent,
+			PLASTIC,
+			true
+		)
+	end
+	if Birds.hasTrait(def, "Cap") then
+		addStatic("Cap", Vector3.new(0.52, 0.3, 0.52), CFrame.new(0, 1.58, -0.5), def.accent, PLASTIC, true)
+	end
+
+	-- tail
+	local tailTilt = CFrame.Angles(math.rad(20), 0, 0)
+	if Birds.hasTrait(def, "LongTail") then
+		addStatic("Tail", Vector3.new(0.3, 0.07, 1.8), CFrame.new(0, 0.82, 1.5) * tailTilt, def.wing, PLASTIC, false)
+		addStatic(
+			"TailTip",
+			Vector3.new(0.34, 0.075, 0.5),
+			CFrame.new(0, 0.5, 2.28) * tailTilt,
+			def.accent,
+			PLASTIC,
+			false
+		)
+	else
+		addStatic("Tail", Vector3.new(0.34, 0.08, 0.7), CFrame.new(0, 0.9, 0.98) * tailTilt, def.wing, PLASTIC, false)
+	end
+	if Birds.hasTrait(def, "FanTail") then
+		local base = CFrame.new(0, 0.9, 0.95) * CFrame.Angles(math.rad(22), 0, 0)
+		for i = 0, 8 do
+			local phi = math.rad(-72 + i * 18)
+			local feather = base * CFrame.Angles(0, 0, phi) * CFrame.new(0, 1.35, 0)
+			local color = if i % 2 == 0 then def.wing else def.belly
+			addStatic("Feather", Vector3.new(0.36, 2.6, 0.06), feather, color, PLASTIC, true)
+			addStatic(
+				"FeatherEye",
+				Vector3.new(0.3, 0.34, 0.07),
+				feather * CFrame.new(0, 0.95, 0.02),
+				Color3.fromRGB(40, 90, 200),
+				PLASTIC,
+				true
+			)
+		end
+	end
+
+	-- wings: each hangs from a shoulder and rotates about the body's forward axis
+	for _, side in { -1, 1 } do
+		local shoulder = CFrame.new(side * 0.46, 1.15, 0)
+		local offset = CFrame.new(side * 0.03, -0.4, 0.05)
+		local wing = add("Wing", Vector3.new(0.1, 0.85, 0.95), shoulder * offset, def.wing, wingMaterial, true)
+		table.insert(wings, {
+			index = #parts,
+			shoulder = CFrame.new(shoulder.Position * s),
+			offset = CFrame.new(offset.Position * s),
+			side = side,
+		})
+		wing.Name = if side < 0 then "WingL" else "WingR"
+	end
+
+	-- effects
+	if not silhouette then
+		if glow then
+			local light = Instance.new("PointLight")
+			light.Color = def.accent
+			light.Range = 10 + 4 * s
+			light.Brightness = 0.9
+			light.Parent = body
+		end
+		if Birds.hasTrait(def, "Fire") then
+			local fire = Instance.new("ParticleEmitter")
+			fire.Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 240, 150)),
+				ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 130, 30)),
+				ColorSequenceKeypoint.new(1, Color3.fromRGB(200, 30, 10)),
+			})
+			fire.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.9 * s), NumberSequenceKeypoint.new(1, 0) })
+			fire.Transparency =
+				NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 1) })
+			fire.Lifetime = NumberRange.new(0.5, 0.9)
+			fire.Rate = 40
+			fire.Speed = NumberRange.new(1, 3)
+			fire.SpreadAngle = Vector2.new(35, 35)
+			fire.EmissionDirection = Enum.NormalId.Top
+			fire.LightEmission = 1
+			fire.Parent = body
+		end
+	end
+
+	local flapRate = (if Birds.hasTrait(def, "Hover") then 58 else 26) / math.sqrt(s)
+
+	return {
+		model = model,
+		parts = parts,
+		rest = rest,
+		static = static,
+		wings = wings,
+		flapRate = flapRate,
+		height = 1.8 * s,
+		def = def,
+	}
+end
+
+-- Moves the whole bird: `rootCF` is where its feet go, `wingAngle` is the wing
+-- spread in radians (0 = folded against the body, ~2 = raised high).
+function BirdModel.pose(rig: Rig, rootCF: CFrame, wingAngle: number)
+	local parts, rest = rig.parts, rig.rest
+	for _, i in rig.static do
+		parts[i].CFrame = rootCF * rest[i]
+	end
+	for _, wing in rig.wings do
+		parts[wing.index].CFrame = rootCF * wing.shoulder * CFrame.Angles(0, 0, wing.side * wingAngle) * wing.offset
+	end
+end
+
+return BirdModel
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="4">
+        <Properties>
+          <string name="Name">Birds</string>
+          <string name="Source"><![CDATA[--!strict
+local Types = require(script.Parent.Types)
+type BirdDef = Types.BirdDef
+
+local function rgb(r: number, g: number, b: number): Color3
+	return Color3.fromRGB(r, g, b)
+end
+
+-- Ordered by rarity so the Birdpedia reads like a field guide.
+local list: { BirdDef } = {
+	-- Common (Sunflower)
+	{
+		id = "sparrow",
+		name = "House Sparrow",
+		rarity = "Common",
+		value = 3,
+		scale = 0.9,
+		blurb = "A cheerful little brown bird that can't resist sunflower seeds.",
+		body = rgb(150, 111, 78),
+		belly = rgb(214, 196, 170),
+		wing = rgb(112, 80, 55),
+		beak = rgb(120, 100, 80),
+		accent = rgb(60, 45, 35),
+		traits = { "Cap" },
+	},
+	{
+		id = "goldfinch",
+		name = "Goldfinch",
+		rarity = "Common",
+		value = 5,
+		scale = 0.85,
+		blurb = "Bright as a buttercup, and just as sweet.",
+		body = rgb(255, 214, 52),
+		belly = rgb(255, 236, 120),
+		wing = rgb(40, 36, 34),
+		beak = rgb(255, 150, 60),
+		accent = rgb(30, 28, 28),
+		traits = { "Cap" },
+	},
+	{
+		id = "dove",
+		name = "Mourning Dove",
+		rarity = "Common",
+		value = 8,
+		scale = 1.1,
+		blurb = "Soft, gentle and always a little sleepy.",
+		body = rgb(176, 168, 170),
+		belly = rgb(222, 206, 200),
+		wing = rgb(140, 132, 136),
+		beak = rgb(70, 70, 70),
+		accent = rgb(60, 60, 70),
+		traits = { "LongTail" },
+	},
+
+	-- Uncommon (Berry Bush)
+	{
+		id = "robin",
+		name = "Robin",
+		rarity = "Uncommon",
+		value = 18,
+		scale = 1.0,
+		blurb = "The first bird of spring, with a warm orange chest.",
+		body = rgb(110, 102, 98),
+		belly = rgb(232, 120, 60),
+		wing = rgb(84, 78, 76),
+		beak = rgb(255, 200, 60),
+		accent = rgb(40, 40, 40),
+		traits = {},
+	},
+	{
+		id = "chickadee",
+		name = "Chickadee",
+		rarity = "Uncommon",
+		value = 26,
+		scale = 0.8,
+		blurb = "Tiny, fearless, and wearing a little black cap.",
+		body = rgb(150, 160, 170),
+		belly = rgb(240, 235, 225),
+		wing = rgb(110, 120, 130),
+		beak = rgb(30, 30, 30),
+		accent = rgb(20, 20, 20),
+		traits = { "Cap" },
+	},
+	{
+		id = "bluebird",
+		name = "Eastern Bluebird",
+		rarity = "Uncommon",
+		value = 36,
+		scale = 1.0,
+		blurb = "A flash of sky-blue that loves ripe berries.",
+		body = rgb(70, 120, 220),
+		belly = rgb(235, 150, 90),
+		wing = rgb(50, 90, 200),
+		beak = rgb(30, 30, 30),
+		accent = rgb(255, 255, 255),
+		traits = {},
+	},
+
+	-- Rare (Cherry Blossom)
+	{
+		id = "bluejay",
+		name = "Blue Jay",
+		rarity = "Rare",
+		value = 110,
+		scale = 1.25,
+		blurb = "Loud, proud and crested. Rules the blossom tree.",
+		body = rgb(70, 130, 230),
+		belly = rgb(235, 240, 250),
+		wing = rgb(40, 90, 200),
+		beak = rgb(30, 30, 35),
+		accent = rgb(30, 40, 90),
+		traits = { "Crest" },
+	},
+	{
+		id = "cardinal",
+		name = "Cardinal",
+		rarity = "Rare",
+		value = 150,
+		scale = 1.2,
+		blurb = "A crimson jewel against the pink petals.",
+		body = rgb(215, 40, 50),
+		belly = rgb(225, 70, 70),
+		wing = rgb(170, 25, 35),
+		beak = rgb(255, 150, 60),
+		accent = rgb(30, 20, 20),
+		traits = { "Crest" },
+	},
+	{
+		id = "oriole",
+		name = "Baltimore Oriole",
+		rarity = "Rare",
+		value = 210,
+		scale = 1.1,
+		blurb = "Blazing orange, with a song like a flute.",
+		body = rgb(255, 140, 20),
+		belly = rgb(255, 170, 50),
+		wing = rgb(30, 30, 30),
+		beak = rgb(120, 120, 130),
+		accent = rgb(20, 20, 20),
+		traits = { "Cap" },
+	},
+
+	-- Epic (Hibiscus)
+	{
+		id = "hummingbird",
+		name = "Ruby Hummingbird",
+		rarity = "Epic",
+		value = 520,
+		scale = 0.7,
+		blurb = "Wings too fast to see. Drawn to the biggest blooms.",
+		body = rgb(40, 170, 110),
+		belly = rgb(230, 230, 225),
+		wing = rgb(200, 220, 230),
+		beak = rgb(30, 30, 30),
+		accent = rgb(240, 40, 80),
+		traits = { "LongBeak", "Hover" },
+	},
+	{
+		id = "parakeet",
+		name = "Sunny Parakeet",
+		rarity = "Epic",
+		value = 720,
+		scale = 1.0,
+		blurb = "Chatters constantly about how nice the garden is.",
+		body = rgb(110, 220, 70),
+		belly = rgb(255, 235, 70),
+		wing = rgb(60, 170, 60),
+		beak = rgb(255, 170, 120),
+		accent = rgb(60, 130, 240),
+		traits = { "LongTail" },
+	},
+	{
+		id = "kingfisher",
+		name = "Kingfisher",
+		rarity = "Epic",
+		value = 1050,
+		scale = 1.2,
+		blurb = "A sharp-eyed jewel that arrives like a blue lightning bolt.",
+		body = rgb(30, 140, 200),
+		belly = rgb(255, 160, 60),
+		wing = rgb(20, 100, 170),
+		beak = rgb(30, 30, 40),
+		accent = rgb(255, 255, 255),
+		traits = { "Crest", "BigBeak" },
+	},
+
+	-- Legendary (Golden Apple Tree)
+	{
+		id = "toucan",
+		name = "Toucan",
+		rarity = "Legendary",
+		value = 3000,
+		scale = 1.7,
+		blurb = "That beak is a lot, but it's also the point.",
+		body = rgb(30, 30, 35),
+		belly = rgb(255, 255, 255),
+		wing = rgb(20, 20, 25),
+		beak = rgb(255, 150, 20),
+		accent = rgb(60, 180, 230),
+		traits = { "BigBeak" },
+	},
+	{
+		id = "macaw",
+		name = "Scarlet Macaw",
+		rarity = "Legendary",
+		value = 4200,
+		scale = 1.8,
+		blurb = "A living rainbow with a tail like a comet.",
+		body = rgb(230, 30, 30),
+		belly = rgb(240, 60, 50),
+		wing = rgb(50, 100, 230),
+		beak = rgb(240, 235, 225),
+		accent = rgb(255, 210, 40),
+		traits = { "LongTail" },
+	},
+	{
+		id = "peacock",
+		name = "Peacock",
+		rarity = "Legendary",
+		value = 6400,
+		scale = 1.9,
+		blurb = "Only the golden tree is grand enough to deserve this display.",
+		body = rgb(20, 110, 190),
+		belly = rgb(30, 150, 170),
+		wing = rgb(30, 140, 120),
+		beak = rgb(200, 190, 150),
+		accent = rgb(30, 170, 100),
+		traits = { "FanTail", "Crest" },
+	},
+
+	-- Mythic (Starbloom)
+	{
+		id = "owl",
+		name = "Aurora Owl",
+		rarity = "Mythic",
+		value = 22000,
+		scale = 2.2,
+		blurb = "Wakes only for starlight. Its feathers shimmer like the northern sky.",
+		body = rgb(210, 225, 255),
+		belly = rgb(245, 250, 255),
+		wing = rgb(170, 190, 240),
+		beak = rgb(255, 220, 120),
+		accent = rgb(120, 255, 230),
+		traits = { "OwlFace", "Glow" },
+	},
+	{
+		id = "quetzal",
+		name = "Celestial Quetzal",
+		rarity = "Mythic",
+		value = 31000,
+		scale = 2.1,
+		blurb = "The legendary spirit bird, trailing a tail of living emerald.",
+		body = rgb(60, 230, 150),
+		belly = rgb(255, 60, 90),
+		wing = rgb(30, 180, 130),
+		beak = rgb(255, 220, 60),
+		accent = rgb(255, 255, 255),
+		traits = { "Crest", "LongTail", "Glow" },
+	},
+	{
+		id = "phoenix",
+		name = "Phoenix",
+		rarity = "Mythic",
+		value = 48000,
+		scale = 2.4,
+		blurb = "Reborn in fire. Only the rarest bloom in the world calls it home.",
+		body = rgb(255, 110, 20),
+		belly = rgb(255, 200, 40),
+		wing = rgb(255, 60, 20),
+		beak = rgb(255, 230, 120),
+		accent = rgb(255, 255, 180),
+		traits = { "Crest", "LongTail", "Glow", "Fire" },
+	},
+}
+
+local byId: { [string]: BirdDef } = {}
+for _, bird in list do
+	byId[bird.id] = bird
+end
+
+local Birds = {
+	list = list,
+}
+
+function Birds.get(id: string): BirdDef?
+	return byId[id]
+end
+
+function Birds.hasTrait(bird: BirdDef, trait: string): boolean
+	return table.find(bird.traits, trait) ~= nil
+end
+
+return Birds
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="5">
+        <Properties>
+          <string name="Name">Clock</string>
+          <string name="Source"><![CDATA[--!strict
+-- One clock for the whole game. GetServerTimeNow is synchronised between the
+-- server and every client, so timers agree everywhere (and survive restarts).
+
+local Clock = {}
+
+function Clock.now(): number
+	return workspace:GetServerTimeNow()
+end
+
+return Clock
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="6">
+        <Properties>
+          <string name="Name">Config</string>
+          <string name="Source"><![CDATA[--!strict
+-- Every tunable number in the game lives here.
+
+local Config = {
+	GAME_NAME = "Grow a Bird Garden",
+
+	-- Progression
+	START_FEATHERS = 30,
+	START_SEEDS = { sunflower = 3 } :: { [string]: number },
+	START_PLOTS = 4,
+	MAX_PLOTS = 12,
+	-- Price of plot #5, #6, #7 ... (plots unlock in order)
+	PLOT_PRICES = { 150, 450, 1200, 3500, 10000, 30000, 90000, 250000 } :: { number },
+
+	-- Garden layout
+	MAX_GARDENS = 8,
+	PLOT_COLUMNS = 4,
+	PLOT_ROWS = 3,
+
+	-- Seed shop restocks on a fixed global clock so every server agrees
+	RESTOCK_INTERVAL = 180,
+	MAX_BUY_AMOUNT = 25,
+
+	-- Plants
+	SCALE_MIN = 0.22, -- size of a freshly planted seed relative to full size
+
+	-- Bird visits (one independent "perch slot" per perch on a plant)
+	TICK = 0.25,
+	VISIT = {
+		FIRST_WAIT_MIN = 3, -- delay before the first bird once a plant blooms
+		FIRST_WAIT_MAX = 7,
+		WAIT_MIN = 8, -- delay between birds on the same perch
+		WAIT_MAX = 18,
+		STAY_MIN = 10,
+		STAY_MAX = 16,
+		ARRIVE = 4.5, -- fly-in time; feathers are paid when the bird lands
+		LEAVE = 3.5,
+	},
+	DISCOVERY_MULTIPLIER = 5, -- first time you see a species: value x this, once
+
+	AUTOSAVE_INTERVAL = 60,
+	DATASTORE_NAME = "GrowABirdGarden_v1",
+}
+
+Config.RARITY_ORDER = { "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic" }
+
+Config.RARITY_COLORS = {
+	Common = Color3.fromRGB(196, 200, 204),
+	Uncommon = Color3.fromRGB(98, 214, 104),
+	Rare = Color3.fromRGB(84, 160, 255),
+	Epic = Color3.fromRGB(180, 104, 255),
+	Legendary = Color3.fromRGB(255, 184, 48),
+	Mythic = Color3.fromRGB(255, 92, 158),
+} :: { [string]: Color3 }
+
+return Config
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="7">
+        <Properties>
+          <string name="Name">Format</string>
+          <string name="Source"><![CDATA[--!strict
+
+local Format = {}
+
+function Format.commas(n: number): string
+	local s = string.format("%.0f", n)
+	local k
+	repeat
+		s, k = string.gsub(s, "^(-?%d+)(%d%d%d)", "%1,%2")
+	until k == 0
+	return s
+end
+
+local SUFFIXES = { "K", "M", "B", "T" }
+
+-- 950 -> "950", 123456 -> "123,456", 1234567 -> "1.23M"
+function Format.feathers(n: number): string
+	n = math.floor(n + 0.5)
+	if n < 1_000_000 then
+		return Format.commas(n)
+	end
+	local value = n
+	local suffix = ""
+	for _, s in SUFFIXES do
+		value /= 1000
+		suffix = s
+		if value < 1000 then
+			break
+		end
+	end
+	local text = string.format("%.2f", value)
+	text = string.gsub(text, "%.?0+$", "")
+	return text .. suffix
+end
+
+-- 34 -> "0:34", 754 -> "12:34", 7300 -> "2h 02m"
+function Format.duration(seconds: number): string
+	seconds = math.max(0, math.ceil(seconds))
+	if seconds >= 3600 then
+		local h = seconds // 3600
+		local m = (seconds % 3600) // 60
+		return string.format("%dh %02dm", h, m)
+	end
+	return string.format("%d:%02d", seconds // 60, seconds % 60)
+end
+
+-- 20 -> "20 sec", 90 -> "1.5 min", 7200 -> "2 hr"
+function Format.growTime(seconds: number): string
+	if seconds < 60 then
+		return string.format("%d sec", seconds)
+	elseif seconds < 3600 then
+		local minutes = seconds / 60
+		if minutes == math.floor(minutes) then
+			return string.format("%d min", minutes)
+		end
+		return string.format("%.1f min", minutes)
+	end
+	local hours = seconds / 3600
+	if hours == math.floor(hours) then
+		return string.format("%d hr", hours)
+	end
+	return string.format("%.1f hr", hours)
+end
+
+return Format
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">Growth</string>
+          <string name="Source"><![CDATA[--!strict
+-- Pure game rules (no Instances), so they can be unit-tested outside Roblox.
+
+local Config = require(script.Parent.Config)
+local Seeds = require(script.Parent.Seeds)
+local Types = require(script.Parent.Types)
+type SeedDef = Types.SeedDef
+
+local Growth = {}
+
+-- 0 = just planted, 1 = fully grown
+function Growth.progress(plantedAt: number, growTime: number, now: number): number
+	if growTime <= 0 then
+		return 1
+	end
+	return math.clamp((now - plantedAt) / growTime, 0, 1)
+end
+
+-- Visual size of a plant at a given progress
+function Growth.scale(progress: number): number
+	return Config.SCALE_MIN + (1 - Config.SCALE_MIN) * progress
+end
+
+function Growth.pickBird(seed: SeedDef, rng: Random): string
+	local total = 0
+	for _, entry in seed.birds do
+		total += entry.weight
+	end
+	local roll = rng:NextNumber() * total
+	for _, entry in seed.birds do
+		roll -= entry.weight
+		if roll <= 0 then
+			return entry.id
+		end
+	end
+	return seed.birds[#seed.birds].id
+end
+
+-- The shop restocks on a fixed global clock. The roll is seeded by the interval
+-- number, so every server sees the same stock (like the real Grow a Garden).
+function Growth.restockIndex(now: number): number
+	return math.floor(now / Config.RESTOCK_INTERVAL)
+end
+
+function Growth.nextRestock(now: number): number
+	return (Growth.restockIndex(now) + 1) * Config.RESTOCK_INTERVAL
+end
+
+function Growth.rollStock(index: number): { [string]: number }
+	local rng = Random.new(index * 7919 + 17)
+	local stock: { [string]: number } = {}
+	for _, seed in Seeds.list do
+		-- Always consume the same rolls so one seed's luck never shifts another's.
+		local roll = rng:NextNumber()
+		local amount = rng:NextInteger(seed.stock.min, seed.stock.max)
+		if roll < seed.stock.chance then
+			stock[seed.id] = amount
+		end
+	end
+	return stock
+end
+
+-- Price of the next plot to unlock, or nil when every plot is already unlocked.
+function Growth.plotPrice(unlocked: number): number?
+	return Config.PLOT_PRICES[unlocked - Config.START_PLOTS + 1]
+end
+
+-- Expected feathers per visit for a seed (used for balancing and the shop UI).
+function Growth.expectedVisitValue(seed: SeedDef, birdValue: (string) -> number): number
+	local total, weighted = 0, 0
+	for _, entry in seed.birds do
+		total += entry.weight
+		weighted += entry.weight * birdValue(entry.id)
+	end
+	return weighted / total
+end
+
+return Growth
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">PlantModels</string>
+          <string name="Source"><![CDATA[--!strict
+-- Procedural plant models built from primitive parts (no uploaded assets needed).
+-- Every plant is authored at full size with its root at the soil surface.
+--   * parts tagged "Bud"   are visible while the plant is growing
+--   * parts tagged "Bloom" are visible once it is fully grown
+--   * effects tagged "BloomFX" (particles, lights) switch on at full growth
+
+local PlantModels = {}
+
+local Builder = {}
+Builder.__index = Builder
+
+type BuilderData = { model: Model, origin: CFrame }
+type Builder = typeof(setmetatable({} :: BuilderData, Builder))
+
+local PLASTIC = Enum.Material.SmoothPlastic
+
+local function rgb(r: number, g: number, b: number): Color3
+	return Color3.fromRGB(r, g, b)
+end
+
+local function newPart(
+	self: Builder,
+	name: string,
+	size: Vector3,
+	cf: CFrame,
+	color: Color3,
+	material: Enum.Material?,
+	kind: string?
+): Part
+	local p = Instance.new("Part")
+	p.Name = name
+	p.Size = size
+	p.Color = color
+	p.Material = material or PLASTIC
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanTouch = false
+	p.CanQuery = false
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.CFrame = self.origin * cf
+	if kind then
+		p:SetAttribute(kind, true)
+	end
+	p.Parent = self.model
+	return p
+end
+
+-- Squashed sphere (ellipsoid)
+function Builder.blob(
+	self: Builder,
+	name: string,
+	size: Vector3,
+	cf: CFrame,
+	color: Color3,
+	material: Enum.Material?,
+	kind: string?
+): Part
+	local p = newPart(self, name, size, cf, color, material, kind)
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.Sphere
+	mesh.Parent = p
+	return p
+end
+
+function Builder.block(
+	self: Builder,
+	name: string,
+	size: Vector3,
+	cf: CFrame,
+	color: Color3,
+	material: Enum.Material?,
+	kind: string?
+): Part
+	return newPart(self, name, size, cf, color, material, kind)
+end
+
+-- Upright cylinder; `cf` is the centre (rotate it to lean the stem).
+function Builder.stem(
+	self: Builder,
+	name: string,
+	height: number,
+	diameter: number,
+	cf: CFrame,
+	color: Color3,
+	material: Enum.Material?,
+	kind: string?
+): Part
+	local p = newPart(
+		self,
+		name,
+		Vector3.new(height, diameter, diameter),
+		cf * CFrame.Angles(0, 0, math.rad(90)),
+		color,
+		material,
+		kind
+	)
+	p.Shape = Enum.PartType.Cylinder
+	return p
+end
+
+-- Flat disc whose face looks along `cf`'s look vector (-Z).
+function Builder.disc(
+	self: Builder,
+	name: string,
+	thickness: number,
+	diameter: number,
+	cf: CFrame,
+	color: Color3,
+	material: Enum.Material?,
+	kind: string?
+): Part
+	local p = newPart(
+		self,
+		name,
+		Vector3.new(thickness, diameter, diameter),
+		cf * CFrame.Angles(0, math.rad(90), 0),
+		color,
+		material,
+		kind
+	)
+	p.Shape = Enum.PartType.Cylinder
+	return p
+end
+
+function Builder.fx(self: Builder, parent: BasePart, emitter: ParticleEmitter)
+	emitter.Name = "BloomFX"
+	emitter:SetAttribute("BloomFX", true)
+	emitter.Enabled = false
+	emitter.Parent = parent
+end
+
+function Builder.light(self: Builder, parent: BasePart, color: Color3, range: number, brightness: number)
+	local light = Instance.new("PointLight")
+	light.Name = "BloomFX"
+	light:SetAttribute("BloomFX", true)
+	light.Color = color
+	light.Range = range
+	light.Brightness = brightness
+	light.Enabled = false
+	light.Parent = parent
+end
+
+-- A small invisible anchor part that particle emitters can be parented to.
+function Builder.anchor(self: Builder, name: string, size: Vector3, cf: CFrame): Part
+	local p = newPart(self, name, size, cf, rgb(255, 255, 255), PLASTIC, nil)
+	p.Transparency = 1
+	return p
+end
+
+local function sparkle(color: Color3, rate: number, lifetime: number, size: number, speed: number): ParticleEmitter
+	local e = Instance.new("ParticleEmitter")
+	e.Color = ColorSequence.new(color)
+	e.Rate = rate
+	e.Lifetime = NumberRange.new(lifetime * 0.7, lifetime)
+	e.Speed = NumberRange.new(speed * 0.5, speed)
+	e.SpreadAngle = Vector2.new(180, 180)
+	e.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(0.3, size),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	e.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1),
+		NumberSequenceKeypoint.new(0.2, 0.1),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	e.LightEmission = 0.8
+	e.Drag = 1
+	e.Acceleration = Vector3.new(0, 0.5, 0)
+	e.Rotation = NumberRange.new(0, 360)
+	e.RotSpeed = NumberRange.new(-40, 40)
+	return e
+end
+
+local function petalFall(color: Color3): ParticleEmitter
+	local e = Instance.new("ParticleEmitter")
+	e.Color = ColorSequence.new(color)
+	e.Rate = 6
+	e.Lifetime = NumberRange.new(3, 4.5)
+	e.Speed = NumberRange.new(0.5, 1.5)
+	e.EmissionDirection = Enum.NormalId.Bottom
+	e.SpreadAngle = Vector2.new(60, 60)
+	e.Size = NumberSequence.new(0.35)
+	e.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 1) })
+	e.Acceleration = Vector3.new(0, -1.5, 0)
+	e.Rotation = NumberRange.new(0, 360)
+	e.RotSpeed = NumberRange.new(-120, 120)
+	return e
+end
+
+local BARK = rgb(112, 78, 54)
+
+------------------------------------------------------------------------------
+-- Individual plants
+------------------------------------------------------------------------------
+
+local builders: { [string]: (b: Builder) -> () } = {}
+
+function builders.sunflower(b)
+	local stemColor = rgb(70, 140, 60)
+	b:stem("Stem", 4.2, 0.36, CFrame.new(0, 2.1, 0), stemColor, nil, nil)
+	b:blob(
+		"Leaf",
+		Vector3.new(1.6, 0.12, 0.8),
+		CFrame.new(0.9, 1.4, 0) * CFrame.Angles(0, 0, math.rad(22)),
+		rgb(84, 168, 70),
+		nil,
+		nil
+	)
+	b:blob(
+		"Leaf",
+		Vector3.new(1.6, 0.12, 0.8),
+		CFrame.new(-0.9, 2.0, 0) * CFrame.Angles(0, 0, math.rad(-22)),
+		rgb(84, 168, 70),
+		nil,
+		nil
+	)
+
+	-- The flower head looks up and out so birds can perch right on the seeds.
+	local head = CFrame.new(0, 4.65, 0) * CFrame.Angles(math.rad(45), 0, 0)
+	b:blob("Bud", Vector3.new(1.4, 1.4, 1.4), CFrame.new(0, 4.5, 0), rgb(92, 172, 72), nil, "Bud")
+	b:disc("HeadDisc", 0.3, 3.0, head, rgb(255, 205, 40), nil, "Bloom")
+	for i = 0, 9 do
+		local a = i / 10 * math.pi * 2
+		local color = if i % 2 == 0 then rgb(255, 196, 24) else rgb(255, 170, 20)
+		b:blob(
+			"Petal",
+			Vector3.new(1.1, 0.55, 0.14),
+			head * CFrame.Angles(0, 0, a) * CFrame.new(1.75, 0, 0.02),
+			color,
+			nil,
+			"Bloom"
+		)
+	end
+	b:disc("Seeds", 0.5, 1.8, head * CFrame.new(0, 0, -0.1), rgb(88, 58, 36), nil, "Bloom")
+	local glow = b:anchor("FXAnchor", Vector3.new(2, 0.2, 2), CFrame.new(0, 5.2, 0))
+	b:fx(glow, sparkle(rgb(255, 228, 120), 3, 2, 0.35, 2))
+end
+
+function builders.berrybush(b)
+	local greens = { rgb(66, 140, 62), rgb(76, 154, 68), rgb(58, 126, 56), rgb(72, 148, 64), rgb(62, 134, 60) }
+	local blobs = {
+		{ Vector3.new(3.4, 2.4, 3.2), Vector3.new(0, 1.2, 0) },
+		{ Vector3.new(2.4, 2.0, 2.2), Vector3.new(1.3, 1.0, 0.6) },
+		{ Vector3.new(2.4, 2.1, 2.3), Vector3.new(-1.2, 1.1, -0.5) },
+		{ Vector3.new(2.6, 2.1, 2.4), Vector3.new(0.3, 2.1, -0.4) },
+		{ Vector3.new(2.0, 1.7, 2.0), Vector3.new(-0.6, 1.8, 0.8) },
+	}
+	for i, spec in blobs do
+		b:blob("Foliage", spec[1], CFrame.new(spec[2]), greens[i], Enum.Material.Grass, nil)
+	end
+	-- Berries sit on the surface of the main mass of leaves.
+	for i = 1, 18 do
+		local a = i * 2.39996
+		local e = 0.15 + (i % 5) * 0.22
+		local pos =
+			Vector3.new(1.75 * math.cos(e) * math.cos(a), 1.2 + 1.5 * math.sin(e), 1.65 * math.cos(e) * math.sin(a))
+		local color = if i % 3 == 0 then rgb(86, 64, 176) else rgb(196, 30, 76)
+		b:blob("Berry", Vector3.new(0.5, 0.5, 0.5), CFrame.new(pos), color, nil, "Bloom")
+	end
+	local flowerGlow = b:anchor("FXAnchor", Vector3.new(3, 0.2, 3), CFrame.new(0, 3, 0))
+	b:fx(flowerGlow, sparkle(rgb(255, 150, 190), 3, 2, 0.3, 1.5))
+end
+
+function builders.cherry(b)
+	b:stem("Trunk", 5.6, 1.1, CFrame.new(0, 2.8, 0), BARK, Enum.Material.Wood, nil)
+	b:stem(
+		"Branch",
+		3.4,
+		0.6,
+		CFrame.new(1.3, 6.1, 0) * CFrame.Angles(0, 0, math.rad(-35)),
+		BARK,
+		Enum.Material.Wood,
+		nil
+	)
+	b:stem(
+		"Branch",
+		3.4,
+		0.6,
+		CFrame.new(-1.4, 5.9, 0) * CFrame.Angles(0, 0, math.rad(38)),
+		BARK,
+		Enum.Material.Wood,
+		nil
+	)
+
+	local canopy = {
+		{ Vector3.new(5.6, 4.2, 5.3), Vector3.new(0, 8.3, 0) },
+		{ Vector3.new(4.2, 3.4, 4.0), Vector3.new(2.8, 7.9, 0.4) },
+		{ Vector3.new(4.2, 3.2, 4.0), Vector3.new(-2.9, 7.5, 0.4) },
+		{ Vector3.new(3.8, 2.8, 3.6), Vector3.new(0.2, 9.2, -0.5) },
+		{ Vector3.new(3.6, 2.8, 3.6), Vector3.new(0.2, 7.4, 2.3) },
+	}
+	for _, spec in canopy do
+		b:blob("Leaves", spec[1], CFrame.new(spec[2]), rgb(92, 170, 80), Enum.Material.Grass, "Bud")
+		b:blob(
+			"Blossoms",
+			spec[1] * 1.03,
+			CFrame.new(spec[2]),
+			rgb(255, 172, 202),
+			Enum.Material.SmoothPlastic,
+			"Bloom"
+		)
+	end
+	for i = 1, 8 do
+		local a = i * 2.4
+		local pos = Vector3.new(2.6 * math.cos(a), 8.6 + (i % 3) * 0.8, 2.5 * math.sin(a))
+		b:blob("Blossom", Vector3.new(0.8, 0.8, 0.8), CFrame.new(pos), rgb(255, 214, 230), nil, "Bloom")
+	end
+	local petals = b:anchor("FXAnchor", Vector3.new(7, 0.2, 7), CFrame.new(0, 9, 0))
+	b:fx(petals, petalFall(rgb(255, 190, 215)))
+end
+
+local function hibiscusFlower(b: Builder, pos: Vector3, outward: Vector3)
+	local base = CFrame.lookAt(pos, pos + outward)
+	for i = 0, 4 do
+		local a = i / 5 * math.pi * 2
+		local color = if i % 2 == 0 then rgb(255, 64, 90) else rgb(255, 92, 110)
+		b:blob(
+			"Petal",
+			Vector3.new(1.4, 1.1, 0.2),
+			base * CFrame.Angles(0, 0, a) * CFrame.new(0.7, 0, 0),
+			color,
+			nil,
+			"Bloom"
+		)
+	end
+	b:disc("Heart", 0.25, 0.8, base * CFrame.new(0, 0, -0.1), rgb(255, 150, 40), nil, "Bloom")
+	b:blob("Stamen", Vector3.new(0.22, 0.22, 0.9), base * CFrame.new(0, 0, -0.5), rgb(255, 224, 80), nil, "Bloom")
+	b:blob("FlowerBud", Vector3.new(0.7, 1.1, 0.7), CFrame.new(pos), rgb(214, 70, 80), nil, "Bud")
+end
+
+function builders.hibiscus(b)
+	local dark = rgb(44, 128, 62)
+	b:stem("Stem", 3.4, 0.6, CFrame.new(0, 1.7, 0), rgb(96, 84, 52), Enum.Material.Wood, nil)
+	b:stem(
+		"Stem",
+		3.0,
+		0.45,
+		CFrame.new(1.1, 1.6, 0) * CFrame.Angles(0, 0, math.rad(-24)),
+		rgb(96, 84, 52),
+		Enum.Material.Wood,
+		nil
+	)
+	b:stem(
+		"Stem",
+		3.0,
+		0.45,
+		CFrame.new(-1.1, 1.6, 0) * CFrame.Angles(0, 0, math.rad(24)),
+		rgb(96, 84, 52),
+		Enum.Material.Wood,
+		nil
+	)
+	b:blob("Foliage", Vector3.new(4.8, 3.4, 4.6), CFrame.new(0, 3.6, 0), dark, Enum.Material.Grass, nil)
+	b:blob("Foliage", Vector3.new(3.4, 2.6, 3.2), CFrame.new(2.3, 3.1, 0.2), rgb(52, 140, 66), Enum.Material.Grass, nil)
+	b:blob(
+		"Foliage",
+		Vector3.new(3.4, 2.6, 3.2),
+		CFrame.new(-2.3, 3.3, -0.3),
+		rgb(40, 120, 58),
+		Enum.Material.Grass,
+		nil
+	)
+	b:blob("Foliage", Vector3.new(3.4, 2.7, 3.2), CFrame.new(0.4, 5.0, 0.1), rgb(50, 136, 64), Enum.Material.Grass, nil)
+
+	hibiscusFlower(b, Vector3.new(1.0, 3.6, 2.35), Vector3.new(0.2, 0.2, 1))
+	hibiscusFlower(b, Vector3.new(-1.5, 3.9, -2.2), Vector3.new(-0.2, 0.3, -1))
+	hibiscusFlower(b, Vector3.new(3.6, 3.6, 0.3), Vector3.new(1, 0.3, 0.1))
+	hibiscusFlower(b, Vector3.new(-3.9, 3.2, 0.3), Vector3.new(-1, 0.2, 0.1))
+	hibiscusFlower(b, Vector3.new(2.0, 5.5, 1.5), Vector3.new(0.5, 0.6, 0.8))
+	local glow = b:anchor("FXAnchor", Vector3.new(4, 0.2, 4), CFrame.new(0, 5.5, 0))
+	b:fx(glow, sparkle(rgb(255, 120, 150), 4, 2, 0.35, 2))
+end
+
+function builders.goldenapple(b)
+	b:blob("RootFlare", Vector3.new(3.4, 1.4, 3.4), CFrame.new(0, 0.5, 0), BARK, Enum.Material.Wood, nil)
+	b:stem("Trunk", 8, 2.0, CFrame.new(0, 4, 0), BARK, Enum.Material.Wood, nil)
+	b:stem(
+		"Branch",
+		4.4,
+		0.9,
+		CFrame.new(2, 8.2, 0.3) * CFrame.Angles(0, 0, math.rad(-45)),
+		BARK,
+		Enum.Material.Wood,
+		nil
+	)
+	b:stem(
+		"Branch",
+		4.4,
+		0.9,
+		CFrame.new(-2, 8, -0.3) * CFrame.Angles(0, 0, math.rad(45)),
+		BARK,
+		Enum.Material.Wood,
+		nil
+	)
+
+	local mainCenter, mainRadii = Vector3.new(0, 11.5, 0), Vector3.new(4.5, 3.25, 4.25)
+	b:blob("Canopy", mainRadii * 2, CFrame.new(mainCenter), rgb(66, 148, 58), Enum.Material.Grass, nil)
+	b:blob("Canopy", Vector3.new(5, 4.6, 5), CFrame.new(3.6, 10.4, 0.8), rgb(74, 158, 64), Enum.Material.Grass, nil)
+	b:blob("Canopy", Vector3.new(5, 4.6, 5), CFrame.new(-3.7, 10, -0.6), rgb(60, 140, 54), Enum.Material.Grass, nil)
+
+	-- Fruit hangs on the surface of the main canopy: unripe green, then gold.
+	for i = 1, 16 do
+		local a = i * 2.39996
+		local e = -0.55 + (i % 5) * 0.27
+		local pos = mainCenter
+			+ Vector3.new(
+				mainRadii.X * math.cos(e) * math.cos(a),
+				mainRadii.Y * math.sin(e),
+				mainRadii.Z * math.cos(e) * math.sin(a)
+			)
+		b:blob("UnripeApple", Vector3.new(0.6, 0.6, 0.6), CFrame.new(pos), rgb(150, 190, 70), nil, "Bud")
+		local apple = b:blob(
+			"GoldenApple",
+			Vector3.new(1, 1, 1),
+			CFrame.new(pos),
+			rgb(255, 196, 40),
+			Enum.Material.Metal,
+			"Bloom"
+		)
+		apple.Reflectance = 0.15
+	end
+	local glow = b:anchor("FXAnchor", Vector3.new(9, 0.2, 9), CFrame.new(0, 11, 0))
+	b:fx(glow, sparkle(rgb(255, 214, 90), 8, 3, 0.5, 2.5))
+	b:light(glow, rgb(255, 200, 90), 22, 0.8)
+end
+
+function builders.starbloom(b)
+	local deep = rgb(58, 40, 112)
+	b:stem("Trunk", 9, 1.6, CFrame.new(0, 4.5, 0), deep, Enum.Material.SmoothPlastic, nil)
+	b:stem("Vein", 8.6, 0.26, CFrame.new(0.55, 4.4, 0.3), rgb(120, 255, 240), Enum.Material.Neon, "Bloom")
+	b:stem("Vein", 8.6, 0.26, CFrame.new(-0.5, 4.4, -0.35), rgb(255, 150, 240), Enum.Material.Neon, "Bloom")
+	b:stem(
+		"Branch",
+		4.6,
+		0.8,
+		CFrame.new(2.4, 8.6, 0) * CFrame.Angles(0, 0, math.rad(-48)),
+		deep,
+		Enum.Material.SmoothPlastic,
+		nil
+	)
+	b:stem(
+		"Branch",
+		4.6,
+		0.8,
+		CFrame.new(-2.4, 8.6, 0) * CFrame.Angles(0, 0, math.rad(48)),
+		deep,
+		Enum.Material.SmoothPlastic,
+		nil
+	)
+
+	local canopy = {
+		{ size = Vector3.new(7, 5, 7), pos = Vector3.new(0, 13, 0), color = rgb(150, 110, 255) },
+		{ size = Vector3.new(4.6, 4, 4.6), pos = Vector3.new(3.8, 10.6, 0), color = rgb(100, 200, 255) },
+		{ size = Vector3.new(4.6, 4, 4.6), pos = Vector3.new(-3.8, 10.6, 0), color = rgb(255, 130, 224) },
+		{ size = Vector3.new(4.2, 3.6, 4.2), pos = Vector3.new(0, 10.4, 3.6), color = rgb(130, 255, 205) },
+		{ size = Vector3.new(4.2, 3.6, 4.2), pos = Vector3.new(0, 10.4, -3.6), color = rgb(255, 214, 120) },
+	}
+	for _, spec in canopy do
+		b:blob("NightLeaves", spec.size, CFrame.new(spec.pos), rgb(52, 46, 128), Enum.Material.SmoothPlastic, "Bud")
+		b:blob("StarLeaves", spec.size * 1.03, CFrame.new(spec.pos), spec.color, Enum.Material.Neon, "Bloom")
+	end
+	-- Floating star shards orbiting the crown.
+	for i = 1, 10 do
+		local a = i * 2.39996
+		local pos = Vector3.new(math.cos(a) * (7.5 + (i % 3)), 8.5 + (i % 5) * 1.7, math.sin(a) * (7.5 + (i % 3)))
+		local color = if i % 2 == 0 then rgb(255, 250, 190) else rgb(190, 235, 255)
+		b:block(
+			"Shard",
+			Vector3.new(0.6, 0.6, 0.6),
+			CFrame.new(pos) * CFrame.Angles(math.rad(45), math.rad(45), 0),
+			color,
+			Enum.Material.Neon,
+			"Bloom"
+		)
+	end
+	local glow = b:anchor("FXAnchor", Vector3.new(10, 0.2, 10), CFrame.new(0, 12, 0))
+	local e = sparkle(rgb(255, 255, 255), 14, 3.5, 0.55, 3)
+	e.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, rgb(120, 255, 240)),
+		ColorSequenceKeypoint.new(0.5, rgb(190, 130, 255)),
+		ColorSequenceKeypoint.new(1, rgb(255, 130, 224)),
+	})
+	b:fx(glow, e)
+	b:light(glow, rgb(170, 130, 255), 30, 1.4)
+end
+
+------------------------------------------------------------------------------
+-- Public API
+------------------------------------------------------------------------------
+
+-- Shows the right half of a plant: growing look vs blooming look.
+function PlantModels.setMature(model: Model, mature: boolean)
+	for _, d in model:GetDescendants() do
+		if d:IsA("BasePart") then
+			if d:GetAttribute("Bloom") then
+				d.Transparency = if mature then 0 else 1
+			elseif d:GetAttribute("Bud") then
+				d.Transparency = if mature then 1 else 0
+			end
+		elseif d:GetAttribute("BloomFX") then
+			(d :: any).Enabled = mature
+		end
+	end
+	model:SetAttribute("Mature", mature)
+end
+
+function PlantModels.build(seedId: string, origin: CFrame, mature: boolean): Model?
+	local builder = builders[seedId]
+	if not builder then
+		return nil
+	end
+	local model = Instance.new("Model")
+	model.Name = "Plant"
+
+	local root = Instance.new("Part")
+	root.Name = "Root"
+	root.Size = Vector3.new(1, 0.2, 1)
+	root.Transparency = 1
+	root.Anchored = true
+	root.CanCollide = false
+	root.CanTouch = false
+	root.CanQuery = false
+	root.CFrame = origin
+	root.Parent = model
+	model.PrimaryPart = root
+
+	builder(setmetatable({ model = model, origin = origin }, Builder))
+	PlantModels.setMature(model, mature)
+	return model
+end
+
+return PlantModels
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="10">
+        <Properties>
+          <string name="Name">Remotes</string>
+          <string name="Source"><![CDATA[--!strict
+-- All remote events/functions are created by the server at startup and looked
+-- up by name here, so the place file needs no pre-built RemoteEvent instances.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local EVENT_NAMES = {
+	"StateUpdate", -- server -> client: Snapshot
+	"StockUpdate", -- server -> client: StockInfo
+	"BirdVisit", -- server -> client: VisitInfo
+	"BirdCancel", -- server -> client: visit id
+	"Notify", -- server -> client: Notice
+	"PlantSeed", -- client -> server: plotIndex, seedId
+	"DigPlant", -- client -> server: plotIndex
+	"Dev", -- client -> server: action (Studio only)
+}
+
+local FUNCTION_NAMES = {
+	"Init", -- client -> server: returns { state, stock, visits }
+	"BuySeed", -- client -> server: seedId, amount -> Result
+	"UnlockPlot", -- client -> server -> Result
+}
+
+export type Remotes = {
+	StateUpdate: RemoteEvent,
+	StockUpdate: RemoteEvent,
+	BirdVisit: RemoteEvent,
+	BirdCancel: RemoteEvent,
+	Notify: RemoteEvent,
+	PlantSeed: RemoteEvent,
+	DigPlant: RemoteEvent,
+	Dev: RemoteEvent,
+	Init: RemoteFunction,
+	BuySeed: RemoteFunction,
+	UnlockPlot: RemoteFunction,
+}
+
+local cached: Remotes? = nil
+
+local function get(): Remotes
+	if cached then
+		return cached
+	end
+
+	local isServer = RunService:IsServer()
+	local folder: Instance
+	if isServer then
+		local existing = ReplicatedStorage:FindFirstChild("Remotes")
+		if existing then
+			folder = existing
+		else
+			folder = Instance.new("Folder")
+			folder.Name = "Remotes"
+			folder.Parent = ReplicatedStorage
+		end
+	else
+		folder = ReplicatedStorage:WaitForChild("Remotes")
+	end
+
+	local map: { [string]: Instance } = {}
+	local function resolve(name: string, create: () -> Instance)
+		if isServer then
+			local found = folder:FindFirstChild(name)
+			local inst: Instance = found or create()
+			if not found then
+				inst.Name = name
+				inst.Parent = folder
+			end
+			map[name] = inst
+		else
+			map[name] = folder:WaitForChild(name)
+		end
+	end
+	for _, name in EVENT_NAMES do
+		resolve(name, function()
+			return Instance.new("RemoteEvent")
+		end)
+	end
+	for _, name in FUNCTION_NAMES do
+		resolve(name, function()
+			return Instance.new("RemoteFunction")
+		end)
+	end
+
+	local remotes = (map :: any) :: Remotes
+	cached = remotes
+	return remotes
+end
+
+return { get = get }
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="11">
+        <Properties>
+          <string name="Name">Scheduler</string>
+          <string name="Source"><![CDATA[--!strict
+-- Pure state machine for one perch on a plant:
+--   idle --(wait elapsed)--> visiting --(lands: pay feathers)--> visiting --(leaves)--> idle
+-- The server ticks it; the Roblox-specific work (spawning, paying) lives in BirdService.
+
+local Config = require(script.Parent.Config)
+
+local Scheduler = {}
+
+export type Slot = {
+	visiting: boolean,
+	nextVisitAt: number,
+	rewardAt: number,
+	endAt: number,
+	paid: boolean,
+	visitId: number?,
+}
+
+export type Timing = { arrive: number, stay: number, leave: number }
+
+function Scheduler.newSlot(now: number, rng: Random, first: boolean): Slot
+	local v = Config.VISIT
+	local wait = if first
+		then rng:NextNumber(v.FIRST_WAIT_MIN, v.FIRST_WAIT_MAX)
+		else rng:NextNumber(v.WAIT_MIN, v.WAIT_MAX)
+	return { visiting = false, nextVisitAt = now + wait, rewardAt = 0, endAt = 0, paid = false, visitId = nil }
+end
+
+-- What should happen to this slot right now?
+function Scheduler.due(slot: Slot, now: number): "start" | "reward" | "finish" | nil
+	if not slot.visiting then
+		if now >= slot.nextVisitAt then
+			return "start"
+		end
+		return nil
+	end
+	if not slot.paid and now >= slot.rewardAt then
+		return "reward"
+	end
+	if now >= slot.endAt then
+		return "finish"
+	end
+	return nil
+end
+
+function Scheduler.start(slot: Slot, now: number, rng: Random): Timing
+	local v = Config.VISIT
+	local timing = { arrive = v.ARRIVE, stay = rng:NextNumber(v.STAY_MIN, v.STAY_MAX), leave = v.LEAVE }
+	slot.visiting = true
+	slot.paid = false
+	slot.rewardAt = now + timing.arrive
+	slot.endAt = now + timing.arrive + timing.stay + timing.leave
+	return timing
+end
+
+function Scheduler.markPaid(slot: Slot)
+	slot.paid = true
+end
+
+function Scheduler.finish(slot: Slot, now: number, rng: Random)
+	local v = Config.VISIT
+	slot.visiting = false
+	slot.visitId = nil
+	slot.nextVisitAt = now + rng:NextNumber(v.WAIT_MIN, v.WAIT_MAX)
+end
+
+return Scheduler
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="12">
+        <Properties>
+          <string name="Name">Seeds</string>
+          <string name="Source"><![CDATA[--!strict
+local Types = require(script.Parent.Types)
+type SeedDef = Types.SeedDef
+
+-- Better seeds take longer to grow, cost more, and attract rarer birds.
+-- Each seed mostly draws birds of its own tier, with a ~3% chance of a bird
+-- from the tier above (a "lucky visit").
+local list: { SeedDef } = {
+	{
+		id = "sunflower",
+		name = "Sunflower",
+		rarity = "Common",
+		tier = 1,
+		price = 15,
+		growTime = 20,
+		blurb = "Quick to grow. Perfect for finches and sparrows.",
+		color = Color3.fromRGB(255, 205, 40),
+		labelHeight = 6.6,
+		perches = { { 0, 5.1, -0.15 } },
+		birds = {
+			{ id = "sparrow", weight = 60 },
+			{ id = "goldfinch", weight = 29 },
+			{ id = "dove", weight = 10 },
+			{ id = "robin", weight = 1 },
+		},
+		stock = { chance = 1, min = 6, max = 12 },
+	},
+	{
+		id = "berrybush",
+		name = "Berry Bush",
+		rarity = "Uncommon",
+		tier = 2,
+		price = 140,
+		growTime = 90,
+		blurb = "Juicy berries bring the songbirds.",
+		color = Color3.fromRGB(190, 40, 80),
+		labelHeight = 3.4,
+		perches = { { 0.3, 3.2, -0.4 } },
+		birds = {
+			{ id = "robin", weight = 55 },
+			{ id = "chickadee", weight = 30 },
+			{ id = "bluebird", weight = 12 },
+			{ id = "bluejay", weight = 3 },
+		},
+		stock = { chance = 0.8, min = 2, max = 5 },
+	},
+	{
+		id = "cherry",
+		name = "Cherry Blossom",
+		rarity = "Rare",
+		tier = 3,
+		price = 2100,
+		growTime = 300,
+		blurb = "A tree in full bloom. Two perches for two proud visitors.",
+		color = Color3.fromRGB(255, 160, 190),
+		labelHeight = 10.6,
+		perches = { { 2.6, 9.55, 0.4 }, { -2.8, 9.05, 0.4 } },
+		birds = {
+			{ id = "bluejay", weight = 55 },
+			{ id = "cardinal", weight = 30 },
+			{ id = "oriole", weight = 12 },
+			{ id = "hummingbird", weight = 3 },
+		},
+		stock = { chance = 0.5, min = 1, max = 3 },
+	},
+	{
+		id = "hibiscus",
+		name = "Hibiscus",
+		rarity = "Epic",
+		tier = 4,
+		price = 13000,
+		growTime = 900,
+		blurb = "Enormous tropical flowers that hummingbirds dream about.",
+		color = Color3.fromRGB(255, 70, 90),
+		labelHeight = 7,
+		perches = { { 0.4, 6.35, 0.1 }, { -2.3, 4.65, -0.3 } },
+		birds = {
+			{ id = "hummingbird", weight = 50 },
+			{ id = "parakeet", weight = 30 },
+			{ id = "kingfisher", weight = 17 },
+			{ id = "toucan", weight = 3 },
+		},
+		stock = { chance = 0.25, min = 1, max = 2 },
+	},
+	{
+		id = "goldenapple",
+		name = "Golden Apple Tree",
+		rarity = "Legendary",
+		tier = 5,
+		price = 140000,
+		growTime = 2400,
+		blurb = "A magnificent tree of golden fruit. Three perches for the grandest birds.",
+		color = Color3.fromRGB(255, 200, 50),
+		labelHeight = 15,
+		perches = { { 0, 14.8, 0 }, { 3.4, 12.7, 0.8 }, { -3.5, 12.3, -0.6 } },
+		birds = {
+			{ id = "toucan", weight = 50 },
+			{ id = "macaw", weight = 32 },
+			{ id = "peacock", weight = 15 },
+			{ id = "owl", weight = 3 },
+		},
+		stock = { chance = 0.1, min = 1, max = 1 },
+	},
+	{
+		id = "starbloom",
+		name = "Starbloom",
+		rarity = "Mythic",
+		tier = 6,
+		price = 1050000,
+		growTime = 7200,
+		blurb = "A celestial tree that blooms with starlight. Mythic birds only.",
+		color = Color3.fromRGB(180, 120, 255),
+		labelHeight = 16.6,
+		perches = { { 0, 15.55, 0 }, { 3.8, 12.65, 0 }, { -3.8, 12.65, 0 } },
+		birds = {
+			{ id = "owl", weight = 52 },
+			{ id = "quetzal", weight = 32 },
+			{ id = "phoenix", weight = 16 },
+		},
+		stock = { chance = 0.05, min = 1, max = 1 },
+	},
+}
+
+local byId: { [string]: SeedDef } = {}
+for _, seed in list do
+	byId[seed.id] = seed
+end
+
+local Seeds = {
+	list = list,
+}
+
+function Seeds.get(id: string): SeedDef?
+	return byId[id]
+end
+
+function Seeds.isValid(id: any): boolean
+	return typeof(id) == "string" and byId[id] ~= nil
+end
+
+return Seeds
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="13">
+        <Properties>
+          <string name="Name">Signal</string>
+          <string name="Source"><![CDATA[--!strict
+-- Minimal signal so UI modules can react to state changes.
+
+local Signal = {}
+Signal.__index = Signal
+
+export type Connection = { Disconnect: () -> () }
+export type Signal = typeof(setmetatable({} :: { handlers: { [{}]: (...any) -> () } }, Signal))
+
+function Signal.new(): Signal
+	return setmetatable({ handlers = {} }, Signal)
+end
+
+function Signal.Connect(self: Signal, fn: (...any) -> ()): Connection
+	local token = {}
+	self.handlers[token] = fn
+	return {
+		Disconnect = function()
+			self.handlers[token] = nil
+		end,
+	}
+end
+
+function Signal.Fire(self: Signal, ...: any)
+	for _, fn in table.clone(self.handlers) do
+		task.spawn(fn, ...)
+	end
+end
+
+return Signal
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="14">
+        <Properties>
+          <string name="Name">Types</string>
+          <string name="Source"><![CDATA[--!strict
+-- Shared type definitions. Nothing in here exists at runtime.
+
+export type Rarity = "Common" | "Uncommon" | "Rare" | "Epic" | "Legendary" | "Mythic"
+
+export type BirdDef = {
+	id: string,
+	name: string,
+	rarity: Rarity,
+	value: number, -- feathers paid for every visit
+	blurb: string,
+	scale: number, -- 1.0 is roughly a robin
+	body: Color3,
+	belly: Color3,
+	wing: Color3,
+	beak: Color3,
+	accent: Color3,
+	traits: { string }, -- Crest, Cap, LongTail, BigBeak, LongBeak, OwlFace, FanTail, Glow, Fire, Hover
+}
+
+export type WeightedBird = { id: string, weight: number }
+
+export type SeedDef = {
+	id: string,
+	name: string,
+	rarity: Rarity,
+	tier: number,
+	price: number, -- feathers
+	growTime: number, -- seconds
+	blurb: string,
+	color: Color3,
+	labelHeight: number, -- studs above the soil (at full size) for the timer label
+	perches: { { number } }, -- {x, y, z} offsets from the plant root at full size
+	birds: { WeightedBird },
+	stock: { chance: number, min: number, max: number },
+}
+
+export type Snapshot = {
+	feathers: number,
+	seeds: { [string]: number },
+	birds: { [string]: number }, -- species id -> number of visits
+	plots: number, -- unlocked plots
+	nextPlotPrice: number?, -- nil once every plot is unlocked
+	totalVisits: number,
+}
+
+export type VisitInfo = {
+	id: number,
+	birdId: string,
+	ownerUserId: number,
+	perch: Vector3,
+	from: Vector3,
+	to: Vector3,
+	facing: Vector3,
+	startTime: number, -- server time
+	arrive: number,
+	stay: number,
+	leave: number,
+	seed: number, -- cosmetic variation
+}
+
+export type StockInfo = {
+	stock: { [string]: number },
+	nextRestock: number, -- server time
+}
+
+export type Notice = {
+	kind: string, -- "toast" | "reward" | "discovery"
+	text: string?,
+	color: Color3?,
+	amount: number?,
+	birdId: string?,
+	position: Vector3?,
+	bonus: number?,
+}
+
+export type Result = { ok: boolean, message: string }
+
+return {}
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="15">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Script" referent="16">
+      <Properties>
+        <string name="Name">Server</string>
+        <token name="RunContext">0</token>
+        <string name="Source"><![CDATA[--!strict
+-- Grow a Bird Garden - server entry point.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Remotes = require(Shared:WaitForChild("Remotes")).get() -- creates every remote first
+
+local BirdService = require(script.BirdService)
+local DataService = require(script.DataService)
+local DevService = require(script.DevService)
+local GardenService = require(script.GardenService)
+local PlantService = require(script.PlantService)
+local ShopService = require(script.ShopService)
+local Throttle = require(script.Throttle)
+local WorldBuilder = require(script.WorldBuilder)
+
+local ready: { [Player]: boolean } = {}
+local joining: { [Player]: boolean } = {}
+
+-- Remote handlers are assigned before the world is built, so a client that
+-- connects while the map is still being generated never calls an empty handler.
+-- (Everything they touch only becomes reachable once `ready[player]` is set.)
+
+-- The client asks for everything it needs once it has loaded.
+Remotes.Init.OnServerInvoke = function(player: Player)
+	local deadline = os.clock() + 30
+	while not ready[player] and player.Parent == Players and os.clock() < deadline do
+		task.wait(0.1)
+	end
+	local profile = DataService.get(player)
+	if not ready[player] or not profile then
+		return nil
+	end
+	return {
+		state = DataService.snapshot(profile),
+		stock = ShopService.getStock(),
+		visits = BirdService.activeVisits(),
+	}
+end
+
+Remotes.PlantSeed.OnServerEvent:Connect(function(player: Player, plotIndex: any, seedId: any)
+	if ready[player] and Throttle.ok(player, "plant", 0.1) then
+		PlantService.plant(player, plotIndex, seedId)
+	end
+end)
+
+Remotes.DigPlant.OnServerEvent:Connect(function(player: Player, plotIndex: any)
+	if ready[player] and Throttle.ok(player, "dig", 0.2) then
+		PlantService.dig(player, plotIndex)
+	end
+end)
+
+Remotes.BuySeed.OnServerInvoke = function(player: Player, seedId: any, amount: any)
+	if not ready[player] or not Throttle.ok(player, "buy", 0.1) then
+		return { ok = false, message = "Slow down a little!" }
+	end
+	return ShopService.buySeed(player, seedId, amount)
+end
+
+Remotes.UnlockPlot.OnServerInvoke = function(player: Player)
+	if not ready[player] or not Throttle.ok(player, "unlock", 0.3) then
+		return { ok = false, message = "Slow down a little!" }
+	end
+	return ShopService.unlockPlot(player)
+end
+
+local world = WorldBuilder.build()
+GardenService.init(world)
+PlantService.init(world)
+ShopService.init()
+DevService.init()
+DataService.startAutosave()
+
+local function onJoin(player: Player)
+	if joining[player] then
+		return
+	end
+	joining[player] = true
+
+	player.CharacterAdded:Connect(function()
+		if ready[player] then
+			GardenService.placeCharacter(player)
+		end
+	end)
+
+	local profile = DataService.load(player)
+	if not profile or player.Parent ~= Players then
+		return
+	end
+
+	local garden = GardenService.assign(player)
+	if not garden then
+		player:Kick("Every garden on this server is taken. Please join another server!")
+		return
+	end
+
+	DataService.attach(player)
+	GardenService.refreshPlots(player, profile.plots)
+	PlantService.loadPlayer(player, profile)
+	DataService.rescue(player)
+	ready[player] = true
+	GardenService.placeCharacter(player)
+end
+
+local function onLeave(player: Player)
+	ready[player] = nil
+	joining[player] = nil
+	PlantService.clearPlayer(player)
+	GardenService.release(player)
+	DataService.save(player)
+	DataService.release(player)
+end
+
+Players.PlayerAdded:Connect(onJoin)
+Players.PlayerRemoving:Connect(onLeave)
+for _, player in Players:GetPlayers() do
+	task.spawn(onJoin, player)
+end
+
+game:BindToClose(function()
+	DataService.saveAll()
+end)
+]]></string>
+      </Properties>
+      <Item class="ModuleScript" referent="17">
+        <Properties>
+          <string name="Name">BirdService</string>
+          <string name="Source"><![CDATA[--!strict
+-- Runs bird visits. Each perch on a mature plant is an independent slot driven
+-- by the pure Scheduler; this module turns its events into real effects
+-- (spawn a visit for every client, pay feathers, record discoveries).
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local BirdFlight = require(Shared:WaitForChild("BirdFlight"))
+local Birds = require(Shared:WaitForChild("Birds"))
+local Config = require(Shared:WaitForChild("Config"))
+local Growth = require(Shared:WaitForChild("Growth"))
+local Remotes = require(Shared:WaitForChild("Remotes")).get()
+local Scheduler = require(Shared:WaitForChild("Scheduler"))
+local Types = require(Shared:WaitForChild("Types"))
+
+local DataService = require(script.Parent.DataService)
+
+local BirdService = {}
+
+-- What BirdService needs to know about a plant (PlantService's state has all of it).
+export type Habitat = {
+	player: Player,
+	plotIndex: number,
+	seed: Types.SeedDef,
+	root: BasePart,
+	slots: { Scheduler.Slot },
+}
+
+type Active = { info: Types.VisitInfo, habitat: Habitat }
+
+local active: { [number]: Active } = {}
+local nextId = 1
+local rng = Random.new()
+
+local function startVisit(h: Habitat, slotIndex: number, slot: Scheduler.Slot, now: number)
+	local timing = Scheduler.start(slot, now, rng)
+	local birdId = Growth.pickBird(h.seed, rng)
+	local offset = h.seed.perches[slotIndex]
+	local perch = h.root.CFrame:PointToWorldSpace(Vector3.new(offset[1], offset[2], offset[3]))
+	local plan = BirdFlight.plan(perch, rng)
+
+	local id = nextId
+	nextId += 1
+	local info: Types.VisitInfo = {
+		id = id,
+		birdId = birdId,
+		ownerUserId = h.player.UserId,
+		perch = perch,
+		from = plan.from,
+		to = plan.to,
+		facing = plan.facing,
+		startTime = now,
+		arrive = timing.arrive,
+		stay = timing.stay,
+		leave = timing.leave,
+		seed = plan.seed,
+	}
+	active[id] = { info = info, habitat = h }
+	slot.visitId = id
+	Remotes.BirdVisit:FireAllClients(info)
+end
+
+-- The bird has landed: pay the owner and record the species.
+local function payVisit(h: Habitat, slot: Scheduler.Slot)
+	Scheduler.markPaid(slot)
+	local entry = if slot.visitId then active[slot.visitId] else nil
+	local profile = DataService.get(h.player)
+	if not entry or not profile then
+		return
+	end
+	local def = Birds.get(entry.info.birdId)
+	if not def then
+		return
+	end
+
+	local seenBefore = profile.birds[def.id] or 0
+	profile.birds[def.id] = seenBefore + 1
+	profile.totalVisits += 1
+	local bonus = if seenBefore == 0 then def.value * Config.DISCOVERY_MULTIPLIER else 0
+	profile.feathers += def.value + bonus
+	DataService.push(h.player)
+
+	local reward: Types.Notice = {
+		kind = "reward",
+		amount = def.value,
+		birdId = def.id,
+		position = entry.info.perch + Vector3.new(0, 1.5 + def.scale, 0),
+		bonus = if bonus > 0 then bonus else nil,
+	}
+	Remotes.Notify:FireClient(h.player, reward)
+	if bonus > 0 then
+		local discovery: Types.Notice = { kind = "discovery", birdId = def.id, bonus = bonus }
+		Remotes.Notify:FireClient(h.player, discovery)
+	end
+end
+
+local function finishVisit(slot: Scheduler.Slot, now: number)
+	if slot.visitId then
+		active[slot.visitId] = nil
+	end
+	Scheduler.finish(slot, now, rng)
+end
+
+function BirdService.update(h: Habitat, now: number)
+	for index, slot in h.slots do
+		local action = Scheduler.due(slot, now)
+		if action == "start" then
+			startVisit(h, index, slot, now)
+		elseif action == "reward" then
+			payVisit(h, slot)
+		elseif action == "finish" then
+			finishVisit(slot, now)
+		end
+	end
+end
+
+-- The plant is going away: tell clients to drop any birds that were headed for it.
+function BirdService.cancelHabitat(h: Habitat)
+	for _, slot in h.slots do
+		local id = slot.visitId
+		if id and active[id] then
+			active[id] = nil
+			Remotes.BirdCancel:FireAllClients(id)
+		end
+		slot.visitId = nil
+		slot.visiting = false
+	end
+end
+
+-- For players who join mid-visit.
+function BirdService.activeVisits(): { Types.VisitInfo }
+	local list = {}
+	for _, entry in active do
+		table.insert(list, entry.info)
+	end
+	return list
+end
+
+return BirdService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="18">
+        <Properties>
+          <string name="Name">DataService</string>
+          <string name="Source"><![CDATA[--!strict
+-- Player profiles: loading, sanitising, saving, and syncing to the client.
+
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Birds = require(Shared:WaitForChild("Birds"))
+local Clock = require(Shared:WaitForChild("Clock"))
+local Config = require(Shared:WaitForChild("Config"))
+local Growth = require(Shared:WaitForChild("Growth"))
+local Remotes = require(Shared:WaitForChild("Remotes")).get()
+local Seeds = require(Shared:WaitForChild("Seeds"))
+local Types = require(Shared:WaitForChild("Types"))
+
+local DataService = {}
+
+export type PlantRecord = { seedId: string, plantedAt: number }
+
+export type Profile = {
+	version: number,
+	feathers: number,
+	seeds: { [string]: number },
+	birds: { [string]: number },
+	plots: number,
+	plants: { [string]: PlantRecord }, -- keyed by plot index as a string
+	totalVisits: number,
+}
+
+local PROFILE_VERSION = 1
+
+local store: DataStore? = nil
+local storeWarned = false
+local profiles: { [Player]: Profile } = {}
+local ephemeral: { [Player]: boolean } = {} -- Studio without API access: play, but never save
+local dirty: { [Player]: boolean } = {}
+local pushPending: { [Player]: boolean } = {}
+
+local function getStore(): DataStore?
+	if store then
+		return store
+	end
+	local ok, result = pcall(function()
+		return DataStoreService:GetDataStore(Config.DATASTORE_NAME)
+	end)
+	if ok then
+		store = result
+	end
+	return store
+end
+
+local function keyFor(player: Player): string
+	return "Player_" .. player.UserId
+end
+
+local function defaultProfile(): Profile
+	local seeds: { [string]: number } = {}
+	for id, count in Config.START_SEEDS do
+		seeds[id] = count
+	end
+	return {
+		version = PROFILE_VERSION,
+		feathers = Config.START_FEATHERS,
+		seeds = seeds,
+		birds = {},
+		plots = Config.START_PLOTS,
+		plants = {},
+		totalVisits = 0,
+	}
+end
+
+local function isCount(v: any): boolean
+	return type(v) == "number" and v == v and v >= 0 and v < 1e15
+end
+
+-- Never trust stored data: rebuild a valid profile from whatever was loaded.
+local function sanitize(raw: any): Profile
+	local profile = defaultProfile()
+	if type(raw) ~= "table" then
+		return profile
+	end
+
+	if isCount(raw.feathers) then
+		profile.feathers = math.floor(raw.feathers)
+	end
+	if isCount(raw.totalVisits) then
+		profile.totalVisits = math.floor(raw.totalVisits)
+	end
+	if isCount(raw.plots) then
+		profile.plots = math.clamp(math.floor(raw.plots), Config.START_PLOTS, Config.MAX_PLOTS)
+	end
+
+	if type(raw.seeds) == "table" then
+		profile.seeds = {}
+		for id, count in raw.seeds do
+			if Seeds.isValid(id) and isCount(count) and count >= 1 then
+				profile.seeds[id] = math.floor(count)
+			end
+		end
+	end
+	if type(raw.birds) == "table" then
+		for id, count in raw.birds do
+			if type(id) == "string" and Birds.get(id) and isCount(count) and count >= 1 then
+				profile.birds[id] = math.floor(count)
+			end
+		end
+	end
+	if type(raw.plants) == "table" then
+		local now = Clock.now()
+		for key, record in raw.plants do
+			local index = tonumber(key)
+			if
+				index
+				and index == math.floor(index)
+				and index >= 1
+				and index <= profile.plots
+				and type(record) == "table"
+				and Seeds.isValid(record.seedId)
+				and type(record.plantedAt) == "number"
+			then
+				profile.plants[tostring(index)] = {
+					seedId = record.seedId,
+					plantedAt = math.min(record.plantedAt, now), -- no planting in the future
+				}
+			end
+		end
+	end
+	return profile
+end
+
+function DataService.snapshot(profile: Profile): Types.Snapshot
+	local seeds, birds = {}, {}
+	for id, count in profile.seeds do
+		seeds[id] = count
+	end
+	for id, count in profile.birds do
+		birds[id] = count
+	end
+	return {
+		feathers = profile.feathers,
+		seeds = seeds,
+		birds = birds,
+		plots = profile.plots,
+		nextPlotPrice = Growth.plotPrice(profile.plots),
+		totalVisits = profile.totalVisits,
+	}
+end
+
+local function updateLeaderstats(player: Player, profile: Profile)
+	local stats = player:FindFirstChild("leaderstats")
+	if not stats then
+		return
+	end
+	local feathers = stats:FindFirstChild("Feathers") :: IntValue?
+	if feathers then
+		feathers.Value = profile.feathers
+	end
+	local species = stats:FindFirstChild("Birds") :: IntValue?
+	if species then
+		local count = 0
+		for _ in profile.birds do
+			count += 1
+		end
+		species.Value = count
+	end
+end
+
+-- Call after changing a profile: marks it for saving and syncs the client
+-- (batched, so many changes in one frame send one update).
+function DataService.push(player: Player)
+	local profile = profiles[player]
+	if not profile then
+		return
+	end
+	dirty[player] = true
+	updateLeaderstats(player, profile)
+	if pushPending[player] then
+		return
+	end
+	pushPending[player] = true
+	task.defer(function()
+		pushPending[player] = nil
+		local current = profiles[player]
+		if current and player.Parent == Players then
+			Remotes.StateUpdate:FireClient(player, DataService.snapshot(current))
+		end
+	end)
+end
+
+-- Soft-lock protection: a player with no plants, no seeds and too few feathers
+-- to buy the cheapest seed would be stuck forever, so give them one free seed.
+function DataService.rescue(player: Player): boolean
+	local profile = profiles[player]
+	if not profile or next(profile.plants) ~= nil then
+		return false
+	end
+	for _, count in profile.seeds do
+		if count > 0 then
+			return false
+		end
+	end
+	local cheapest = Seeds.list[1]
+	if profile.feathers >= cheapest.price then
+		return false
+	end
+	profile.seeds[cheapest.id] = 1
+	DataService.push(player)
+	return true
+end
+
+function DataService.get(player: Player): Profile?
+	return profiles[player]
+end
+
+-- Loads (yields). Returns nil if the player was kicked because loading failed.
+function DataService.load(player: Player): Profile?
+	local raw: any = nil
+	local ok = true
+	local ds = getStore()
+
+	if ds then
+		for attempt = 1, 3 do
+			local success, result = pcall(function()
+				return ds:GetAsync(keyFor(player))
+			end)
+			if success then
+				raw, ok = result, true
+				break
+			end
+			ok = false
+			if attempt < 3 then
+				task.wait(1.5 * attempt)
+			else
+				warn(`[DataService] Could not load {player.Name}: {result}`)
+			end
+		end
+	else
+		ok = false
+	end
+
+	if not ok then
+		if RunService:IsStudio() then
+			-- Studio without "Enable Studio Access to API Services": play with fresh data.
+			ephemeral[player] = true
+			if not storeWarned then
+				storeWarned = true
+				warn(
+					"[DataService] DataStore unavailable - progress will NOT be saved in this session. "
+						.. "Enable Game Settings > Security > 'Enable Studio Access to API Services' to test saving."
+				)
+			end
+		else
+			-- Never let a player continue on default data: saving would overwrite their real save.
+			player:Kick("We couldn't load your garden. Please rejoin in a moment.")
+			return nil
+		end
+	end
+
+	local profile = sanitize(raw)
+	profiles[player] = profile
+	return profile
+end
+
+-- Creates the leaderboard entries (call once the profile is loaded).
+function DataService.attach(player: Player)
+	local profile = profiles[player]
+	if not profile or player:FindFirstChild("leaderstats") then
+		return
+	end
+	local stats = Instance.new("Folder")
+	stats.Name = "leaderstats"
+	local feathers = Instance.new("IntValue")
+	feathers.Name = "Feathers"
+	feathers.Parent = stats
+	local species = Instance.new("IntValue")
+	species.Name = "Birds"
+	species.Parent = stats
+	stats.Parent = player
+	updateLeaderstats(player, profile)
+end
+
+function DataService.save(player: Player): boolean
+	local profile = profiles[player]
+	local ds = getStore()
+	if not profile or not ds or ephemeral[player] then
+		return false
+	end
+	for attempt = 1, 3 do
+		local success, err = pcall(function()
+			ds:UpdateAsync(keyFor(player), function()
+				return profile
+			end)
+		end)
+		if success then
+			dirty[player] = nil
+			return true
+		end
+		if attempt < 3 then
+			task.wait(1.5 * attempt)
+		else
+			warn(`[DataService] Could not save {player.Name}: {err}`)
+		end
+	end
+	return false
+end
+
+function DataService.release(player: Player)
+	profiles[player] = nil
+	ephemeral[player] = nil
+	dirty[player] = nil
+	pushPending[player] = nil
+end
+
+-- Saves everyone in parallel (used when the server shuts down).
+function DataService.saveAll()
+	local pending = 0
+	for player in profiles do
+		pending += 1
+		task.spawn(function()
+			DataService.save(player)
+			pending -= 1
+		end)
+	end
+	local deadline = os.clock() + 25
+	while pending > 0 and os.clock() < deadline do
+		task.wait(0.1)
+	end
+end
+
+function DataService.startAutosave()
+	task.spawn(function()
+		while true do
+			task.wait(Config.AUTOSAVE_INTERVAL)
+			for player in profiles do
+				if dirty[player] then
+					task.spawn(DataService.save, player)
+				end
+			end
+		end
+	end)
+end
+
+return DataService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="19">
+        <Properties>
+          <string name="Name">DevService</string>
+          <string name="Source"><![CDATA[--!strict
+-- Studio-only cheats so the whole progression can be tested in minutes.
+-- Ignored completely on live servers.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared:WaitForChild("Config"))
+local Remotes = require(Shared:WaitForChild("Remotes")).get()
+local Seeds = require(Shared:WaitForChild("Seeds"))
+
+local DataService = require(script.Parent.DataService)
+local GardenService = require(script.Parent.GardenService)
+local PlantService = require(script.Parent.PlantService)
+local ShopService = require(script.Parent.ShopService)
+
+local DevService = {}
+
+function DevService.init()
+	if not RunService:IsStudio() then
+		return
+	end
+	Remotes.Dev.OnServerEvent:Connect(function(player: Player, action: any)
+		local profile = DataService.get(player)
+		if not profile or type(action) ~= "string" then
+			return
+		end
+		if action == "feathers" then
+			profile.feathers += 100000
+		elseif action == "seeds" then
+			for _, seed in Seeds.list do
+				profile.seeds[seed.id] = (profile.seeds[seed.id] or 0) + 5
+			end
+		elseif action == "grow" then
+			PlantService.growAll(player)
+		elseif action == "plots" then
+			profile.plots = Config.MAX_PLOTS
+			GardenService.refreshPlots(player, profile.plots)
+		elseif action == "stock" then
+			ShopService.devFillStock()
+		end
+		DataService.push(player)
+	end)
+end
+
+return DevService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="20">
+        <Properties>
+          <string name="Name">GardenService</string>
+          <string name="Source"><![CDATA[--!strict
+-- Hands out garden slots to players and keeps the plots' look in sync with
+-- how many the owner has unlocked.
+
+local Players = game:GetService("Players")
+
+local WorldBuilder = require(script.Parent.WorldBuilder)
+type Garden = WorldBuilder.Garden
+
+local GardenService = {}
+
+local SOIL_COLOR = Color3.fromRGB(96, 68, 46)
+local LOCKED_COLOR = Color3.fromRGB(116, 118, 124)
+
+local world: WorldBuilder.World? = nil
+local byPlayer: { [Player]: Garden } = {}
+
+function GardenService.init(builtWorld: WorldBuilder.World)
+	world = builtWorld
+end
+
+local function setLocked(garden: Garden, index: number, locked: boolean)
+	local soil = garden.plots[index]
+	soil:SetAttribute("Locked", locked)
+	soil.Color = if locked then LOCKED_COLOR else SOIL_COLOR
+	soil.Material = if locked then Enum.Material.Slate else Enum.Material.Ground
+	garden.lockGuis[index].Enabled = locked
+end
+
+local function setSign(garden: Garden, text: string)
+	for _, label in garden.signLabels do
+		label.Text = text
+	end
+end
+
+function GardenService.get(player: Player): Garden?
+	return byPlayer[player]
+end
+
+function GardenService.assign(player: Player): Garden?
+	if not world then
+		return nil
+	end
+	for _, garden in world.gardens do
+		if garden.owner == nil then
+			garden.owner = player
+			garden.model:SetAttribute("OwnerUserId", player.UserId)
+			setSign(garden, player.DisplayName .. "'s Garden")
+			byPlayer[player] = garden
+			return garden
+		end
+	end
+	return nil
+end
+
+function GardenService.release(player: Player)
+	local garden = byPlayer[player]
+	if not garden then
+		return
+	end
+	byPlayer[player] = nil
+	garden.owner = nil
+	garden.model:SetAttribute("OwnerUserId", 0)
+	setSign(garden, "Free Garden")
+	for index, soil in garden.plots do
+		soil:SetAttribute("HasPlant", false)
+		setLocked(garden, index, true)
+	end
+end
+
+function GardenService.refreshPlots(player: Player, unlocked: number)
+	local garden = byPlayer[player]
+	if not garden then
+		return
+	end
+	for index in garden.plots do
+		setLocked(garden, index, index > unlocked)
+	end
+end
+
+function GardenService.setHasPlant(player: Player, index: number, has: boolean)
+	local garden = byPlayer[player]
+	if garden then
+		garden.plots[index]:SetAttribute("HasPlant", has)
+	end
+end
+
+-- Where a plant's root sits: the middle of the soil's top surface.
+function GardenService.plantCFrame(player: Player, index: number): CFrame?
+	local garden = byPlayer[player]
+	if not garden then
+		return nil
+	end
+	local soil = garden.plots[index]
+	return soil.CFrame * CFrame.new(0, soil.Size.Y / 2, 0)
+end
+
+function GardenService.placeCharacter(player: Player)
+	local garden = byPlayer[player]
+	local character = player.Character
+	if not garden or not character or player.Parent ~= Players then
+		return
+	end
+	local root = character:WaitForChild("HumanoidRootPart", 5)
+	if root and character.Parent then
+		character:PivotTo(garden.spawnCF)
+	end
+end
+
+return GardenService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="21">
+        <Properties>
+          <string name="Name">PlantService</string>
+          <string name="Source"><![CDATA[--!strict
+-- Planting, growing and digging up plants. Growth is derived from the planting
+-- timestamp, so plants keep growing while the owner is offline.
+
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Clock = require(Shared:WaitForChild("Clock"))
+local Config = require(Shared:WaitForChild("Config"))
+local Growth = require(Shared:WaitForChild("Growth"))
+local PlantModels = require(Shared:WaitForChild("PlantModels"))
+local Remotes = require(Shared:WaitForChild("Remotes")).get()
+local Scheduler = require(Shared:WaitForChild("Scheduler"))
+local Seeds = require(Shared:WaitForChild("Seeds"))
+local Types = require(Shared:WaitForChild("Types"))
+
+local BirdService = require(script.Parent.BirdService)
+local DataService = require(script.Parent.DataService)
+local GardenService = require(script.Parent.GardenService)
+local WorldBuilder = require(script.Parent.WorldBuilder)
+
+local PlantService = {}
+
+type PlantState = {
+	player: Player,
+	plotIndex: number,
+	seed: Types.SeedDef,
+	plantedAt: number,
+	model: Model,
+	root: BasePart,
+	mature: boolean,
+	lastScale: number,
+	slots: { Scheduler.Slot },
+}
+
+local states: { [Player]: { [number]: PlantState } } = {}
+local plantsFolder: Folder? = nil
+local rng = Random.new()
+
+local function notify(player: Player, text: string, color: Color3?)
+	local notice: Types.Notice = { kind = "toast", text = text, color = color }
+	Remotes.Notify:FireClient(player, notice)
+end
+
+local function bloom(state: PlantState, now: number, announce: boolean)
+	state.mature = true
+	PlantModels.setMature(state.model, true)
+	state.slots = {}
+	for _ in state.seed.perches do
+		table.insert(state.slots, Scheduler.newSlot(now, rng, true))
+	end
+	if announce then
+		notify(
+			state.player,
+			`Your {state.seed.name} is fully grown! Birds will start visiting soon.`,
+			Config.RARITY_COLORS[state.seed.rarity]
+		)
+	end
+end
+
+local function spawnPlant(
+	player: Player,
+	plotIndex: number,
+	seedId: string,
+	plantedAt: number,
+	announce: boolean
+): PlantState?
+	local seed = Seeds.get(seedId)
+	local cf = GardenService.plantCFrame(player, plotIndex)
+	local folder = plantsFolder
+	if not seed or not cf or not folder then
+		return nil
+	end
+
+	local now = Clock.now()
+	local progress = Growth.progress(plantedAt, seed.growTime, now)
+	local model = PlantModels.build(seedId, cf, false)
+	if not model then
+		return nil
+	end
+	model.Name = string.format("Plant_%d_%d", player.UserId, plotIndex)
+	model:SetAttribute("SeedId", seedId)
+	model:SetAttribute("PlantedAt", plantedAt)
+	model:SetAttribute("GrowTime", seed.growTime)
+	model:SetAttribute("OwnerUserId", player.UserId)
+	model:SetAttribute("PlotIndex", plotIndex)
+	CollectionService:AddTag(model, "Plant")
+	model.Parent = folder
+
+	local scale = Growth.scale(progress)
+	if scale < 1 then
+		model:ScaleTo(scale)
+	end
+
+	local state: PlantState = {
+		player = player,
+		plotIndex = plotIndex,
+		seed = seed,
+		plantedAt = plantedAt,
+		model = model,
+		root = model.PrimaryPart :: BasePart,
+		mature = false,
+		lastScale = scale,
+		slots = {},
+	}
+	if progress >= 1 then
+		bloom(state, now, announce)
+	end
+
+	local plants = states[player]
+	if not plants then
+		plants = {}
+		states[player] = plants
+	end
+	plants[plotIndex] = state
+	GardenService.setHasPlant(player, plotIndex, true)
+	return state
+end
+
+local function updatePlant(state: PlantState, now: number)
+	if state.mature then
+		BirdService.update(state, now)
+		return
+	end
+	local progress = Growth.progress(state.plantedAt, state.seed.growTime, now)
+	local scale = Growth.scale(progress)
+	if progress >= 1 then
+		state.model:ScaleTo(1)
+		state.lastScale = 1
+		bloom(state, now, true)
+	elseif scale - state.lastScale >= 0.012 then
+		state.model:ScaleTo(scale)
+		state.lastScale = scale
+	end
+end
+
+function PlantService.init(world: WorldBuilder.World)
+	plantsFolder = world.plantsFolder
+	task.spawn(function()
+		while true do
+			task.wait(Config.TICK)
+			local now = Clock.now()
+			for _, plants in states do
+				for _, state in plants do
+					xpcall(updatePlant, function(err)
+						warn("[PlantService] update failed: " .. tostring(err))
+					end, state, now)
+				end
+			end
+		end
+	end)
+end
+
+-- Recreates a player's saved plants when they join.
+function PlantService.loadPlayer(player: Player, profile: DataService.Profile)
+	for key, record in profile.plants do
+		local index = tonumber(key)
+		if index then
+			spawnPlant(player, index, record.seedId, record.plantedAt, false)
+		end
+	end
+end
+
+function PlantService.plant(player: Player, plotIndex: any, seedId: any)
+	local profile = DataService.get(player)
+	if not profile or not GardenService.get(player) then
+		return
+	end
+	if
+		type(plotIndex) ~= "number"
+		or plotIndex ~= math.floor(plotIndex)
+		or plotIndex < 1
+		or plotIndex > Config.MAX_PLOTS
+	then
+		return
+	end
+	if plotIndex > profile.plots then
+		notify(player, "That plot is still locked.")
+		return
+	end
+	if not Seeds.isValid(seedId) then
+		return
+	end
+	local id = seedId :: string
+	local key = tostring(plotIndex)
+	if profile.plants[key] then
+		notify(player, "Something is already growing there.")
+		return
+	end
+	local count = profile.seeds[id] or 0
+	if count < 1 then
+		notify(player, "You don't have any of that seed. Visit the Seed Shop!")
+		return
+	end
+
+	local plantedAt = Clock.now()
+	if not spawnPlant(player, plotIndex, id, plantedAt, true) then
+		return
+	end
+	if count > 1 then
+		profile.seeds[id] = count - 1
+	else
+		profile.seeds[id] = nil
+	end
+	profile.plants[key] = { seedId = id, plantedAt = plantedAt }
+	DataService.push(player)
+end
+
+-- Digging up a growing plant returns the seed; a grown plant is lost for good.
+function PlantService.dig(player: Player, plotIndex: any)
+	local profile = DataService.get(player)
+	if not profile or type(plotIndex) ~= "number" then
+		return
+	end
+	local plants = states[player]
+	local state = if plants then plants[plotIndex] else nil
+	if not plants or not state then
+		return
+	end
+
+	BirdService.cancelHabitat(state)
+	state.model:Destroy()
+	plants[plotIndex] = nil
+	profile.plants[tostring(plotIndex)] = nil
+	if not state.mature then
+		profile.seeds[state.seed.id] = (profile.seeds[state.seed.id] or 0) + 1
+	end
+	GardenService.setHasPlant(player, plotIndex, false)
+	DataService.push(player)
+	if DataService.rescue(player) then
+		notify(player, "Here's a free Sunflower seed to get you going again!", Config.RARITY_COLORS.Common)
+	end
+end
+
+function PlantService.clearPlayer(player: Player)
+	local plants = states[player]
+	if not plants then
+		return
+	end
+	states[player] = nil
+	for _, state in plants do
+		BirdService.cancelHabitat(state)
+		state.model:Destroy()
+	end
+end
+
+-- Dev helper: finish every growing plant right now.
+function PlantService.growAll(player: Player)
+	local profile = DataService.get(player)
+	local plants = states[player]
+	if not profile or not plants then
+		return
+	end
+	local now = Clock.now()
+	for index, state in plants do
+		if not state.mature then
+			local plantedAt = now - state.seed.growTime
+			state.plantedAt = plantedAt
+			state.model:SetAttribute("PlantedAt", plantedAt)
+			local record = profile.plants[tostring(index)]
+			if record then
+				record.plantedAt = plantedAt
+			end
+		end
+	end
+	DataService.push(player)
+end
+
+return PlantService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="22">
+        <Properties>
+          <string name="Name">ShopService</string>
+          <string name="Source"><![CDATA[--!strict
+-- The seed shop. Stock restocks on a fixed global clock (the roll is seeded by
+-- the restock number, so every server shows the same shelves) and is shared by
+-- everyone on the server, so rare seeds can sell out.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Clock = require(Shared:WaitForChild("Clock"))
+local Config = require(Shared:WaitForChild("Config"))
+local Format = require(Shared:WaitForChild("Format"))
+local Growth = require(Shared:WaitForChild("Growth"))
+local Remotes = require(Shared:WaitForChild("Remotes")).get()
+local Seeds = require(Shared:WaitForChild("Seeds"))
+local Types = require(Shared:WaitForChild("Types"))
+
+local DataService = require(script.Parent.DataService)
+local GardenService = require(script.Parent.GardenService)
+
+local ShopService = {}
+
+local currentIndex = -1
+local stock: { [string]: number } = {}
+
+-- Returns true if a new restock just happened.
+local function refresh(): boolean
+	local index = Growth.restockIndex(Clock.now())
+	if index == currentIndex then
+		return false
+	end
+	currentIndex = index
+	stock = Growth.rollStock(index)
+	return true
+end
+
+function ShopService.getStock(): Types.StockInfo
+	refresh()
+	local copy = {}
+	for id, count in stock do
+		copy[id] = count
+	end
+	return { stock = copy, nextRestock = Growth.nextRestock(Clock.now()) }
+end
+
+local function broadcast()
+	Remotes.StockUpdate:FireAllClients(ShopService.getStock())
+end
+
+function ShopService.init()
+	refresh()
+	task.spawn(function()
+		while true do
+			task.wait(1)
+			if refresh() then
+				broadcast()
+			end
+		end
+	end)
+end
+
+function ShopService.buySeed(player: Player, seedId: any, amount: any): Types.Result
+	local profile = DataService.get(player)
+	if not profile then
+		return { ok = false, message = "Still loading your garden..." }
+	end
+	if not Seeds.isValid(seedId) then
+		return { ok = false, message = "Unknown seed." }
+	end
+	if type(amount) ~= "number" or amount ~= math.floor(amount) or amount < 1 or amount > Config.MAX_BUY_AMOUNT then
+		return { ok = false, message = "Invalid amount." }
+	end
+
+	refresh()
+	local id = seedId :: string
+	local seed = Seeds.get(id) :: Types.SeedDef
+	local available = stock[id] or 0
+	if available < 1 then
+		return { ok = false, message = `{seed.name} is out of stock. Check back after the restock!` }
+	end
+	if amount > available then
+		return { ok = false, message = `Only {available} left in stock.` }
+	end
+	local cost = seed.price * amount
+	if profile.feathers < cost then
+		return { ok = false, message = `Not enough feathers (need {Format.feathers(cost)}).` }
+	end
+
+	profile.feathers -= cost
+	profile.seeds[id] = (profile.seeds[id] or 0) + amount
+	stock[id] = available - amount
+	DataService.push(player)
+	broadcast()
+	return { ok = true, message = `Bought {amount}x {seed.name}!` }
+end
+
+function ShopService.unlockPlot(player: Player): Types.Result
+	local profile = DataService.get(player)
+	if not profile then
+		return { ok = false, message = "Still loading your garden..." }
+	end
+	local price = Growth.plotPrice(profile.plots)
+	if not price then
+		return { ok = false, message = "Every plot is already unlocked!" }
+	end
+	if profile.feathers < price then
+		return { ok = false, message = `Not enough feathers (need {Format.feathers(price)}).` }
+	end
+	profile.feathers -= price
+	profile.plots += 1
+	GardenService.refreshPlots(player, profile.plots)
+	DataService.push(player)
+	return { ok = true, message = `Plot {profile.plots} unlocked!` }
+end
+
+-- Dev helper: fill every shelf.
+function ShopService.devFillStock()
+	refresh()
+	for _, seed in Seeds.list do
+		stock[seed.id] = 10
+	end
+	broadcast()
+end
+
+return ShopService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="23">
+        <Properties>
+          <string name="Name">Throttle</string>
+          <string name="Source"><![CDATA[--!strict
+-- Tiny per-player rate limiter for remote handlers.
+
+local Throttle = {}
+
+local last: { [string]: { [Player]: number } } = {}
+
+function Throttle.ok(player: Player, key: string, interval: number): boolean
+	local bucket = last[key]
+	if not bucket then
+		bucket = setmetatable({}, { __mode = "k" }) :: any
+		last[key] = bucket
+	end
+	local now = os.clock()
+	local previous = (bucket :: { [Player]: number })[player]
+	if previous and now - previous < interval then
+		return false
+	end
+	(bucket :: { [Player]: number })[player] = now
+	return true
+end
+
+return Throttle
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="24">
+        <Properties>
+          <string name="Name">WorldBuilder</string>
+          <string name="Source"><![CDATA[--!strict
+-- Builds the whole map from parts at startup: ground, hub plaza (seed shop +
+-- Birdpedia), scenery, and one fenced garden per player slot.
+
+local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared:WaitForChild("Config"))
+local Seeds = require(Shared:WaitForChild("Seeds"))
+
+local WorldBuilder = {}
+
+export type Garden = {
+	slot: number,
+	model: Model,
+	origin: CFrame,
+	spawnCF: CFrame,
+	plots: { Part },
+	lockGuis: { SurfaceGui },
+	signLabels: { TextLabel },
+	owner: Player?,
+}
+
+export type World = {
+	gardens: { Garden },
+	plantsFolder: Folder,
+}
+
+local TOP = 0.6 -- height of the walkable surface (plaza, paths, garden pads)
+local GARDEN_RADIUS = 125
+local PLOT_SIZE = 10
+local PLOT_PITCH = 13
+
+local GRASS = Color3.fromRGB(98, 172, 86)
+local WOOD = Color3.fromRGB(150, 106, 68)
+local CREAM = Color3.fromRGB(250, 240, 214)
+
+local function rgb(r: number, g: number, b: number): Color3
+	return Color3.fromRGB(r, g, b)
+end
+
+local function part(
+	parent: Instance,
+	name: string,
+	size: Vector3,
+	cf: CFrame,
+	color: Color3,
+	material: Enum.Material?,
+	collide: boolean?
+): Part
+	local p = Instance.new("Part")
+	p.Name = name
+	p.Size = size
+	p.CFrame = cf
+	p.Color = color
+	p.Material = material or Enum.Material.SmoothPlastic
+	p.Anchored = true
+	p.CanCollide = if collide == nil then true else collide
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.Parent = parent
+	return p
+end
+
+-- Upright cylinder centred at `cf`
+local function cylinder(
+	parent: Instance,
+	name: string,
+	height: number,
+	diameter: number,
+	cf: CFrame,
+	color: Color3,
+	material: Enum.Material?,
+	collide: boolean?
+): Part
+	local p = part(
+		parent,
+		name,
+		Vector3.new(height, diameter, diameter),
+		cf * CFrame.Angles(0, 0, math.rad(90)),
+		color,
+		material,
+		collide
+	)
+	p.Shape = Enum.PartType.Cylinder
+	return p
+end
+
+local function ball(
+	parent: Instance,
+	name: string,
+	size: Vector3,
+	cf: CFrame,
+	color: Color3,
+	material: Enum.Material?
+): Part
+	local p = part(parent, name, size, cf, color, material, false)
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.Sphere
+	mesh.Parent = p
+	return p
+end
+
+local function surfaceText(
+	target: Part,
+	face: Enum.NormalId,
+	text: string,
+	color: Color3?,
+	pixelsPerStud: number?
+): (SurfaceGui, TextLabel)
+	local gui = Instance.new("SurfaceGui")
+	gui.Face = face
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	gui.PixelsPerStud = pixelsPerStud or 40
+	gui.LightInfluence = 0
+	gui.Parent = target
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.TextScaled = true
+	label.Font = Enum.Font.FredokaOne
+	label.TextColor3 = color or CREAM
+	label.TextStrokeColor3 = Color3.fromRGB(60, 40, 24)
+	label.TextStrokeTransparency = 0.45
+	label.Parent = gui
+	return gui, label
+end
+
+local function billboardText(parent: BasePart, text: string, offset: Vector3, width: number, height: number): TextLabel
+	local gui = Instance.new("BillboardGui")
+	gui.Size = UDim2.fromOffset(width, height)
+	gui.StudsOffsetWorldSpace = offset
+	gui.MaxDistance = 140
+	gui.LightInfluence = 0
+	gui.Parent = parent
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.TextScaled = true
+	label.Font = Enum.Font.FredokaOne
+	label.TextColor3 = CREAM
+	label.TextStrokeColor3 = Color3.fromRGB(50, 34, 20)
+	label.TextStrokeTransparency = 0.3
+	label.Parent = gui
+	return label
+end
+
+local function prompt(parent: BasePart, name: string, action: string, object: string)
+	local p = Instance.new("ProximityPrompt")
+	p.Name = name
+	p.ActionText = action
+	p.ObjectText = object
+	p.KeyboardKeyCode = Enum.KeyCode.E
+	p.HoldDuration = 0
+	p.MaxActivationDistance = 18
+	p.RequiresLineOfSight = false
+	p.Parent = parent
+end
+
+------------------------------------------------------------------------------
+-- Lighting
+------------------------------------------------------------------------------
+
+function WorldBuilder.setupLighting()
+	Lighting.ClockTime = 14.2
+	Lighting.Brightness = 2.6
+	Lighting.Ambient = rgb(104, 108, 120)
+	Lighting.OutdoorAmbient = rgb(128, 134, 150)
+	Lighting.EnvironmentDiffuseScale = 0.6
+	Lighting.EnvironmentSpecularScale = 0.4
+
+	for _, class in { "Atmosphere", "Sky", "ColorCorrectionEffect", "BloomEffect", "SunRaysEffect" } do
+		for _, child in Lighting:GetChildren() do
+			if child.ClassName == class then
+				child:Destroy()
+			end
+		end
+	end
+
+	local sky = Instance.new("Sky")
+	sky.Parent = Lighting
+
+	local atmosphere = Instance.new("Atmosphere")
+	atmosphere.Density = 0.26
+	atmosphere.Offset = 0.2
+	atmosphere.Color = rgb(190, 208, 230)
+	atmosphere.Decay = rgb(240, 220, 190)
+	atmosphere.Glare = 0.2
+	atmosphere.Haze = 0.8
+	atmosphere.Parent = Lighting
+
+	local correction = Instance.new("ColorCorrectionEffect")
+	correction.Saturation = 0.14
+	correction.Contrast = 0.05
+	correction.TintColor = rgb(255, 250, 242)
+	correction.Parent = Lighting
+
+	local bloom = Instance.new("BloomEffect")
+	bloom.Intensity = 0.3
+	bloom.Size = 20
+	bloom.Threshold = 1.1
+	bloom.Parent = Lighting
+
+	local rays = Instance.new("SunRaysEffect")
+	rays.Intensity = 0.05
+	rays.Spread = 0.6
+	rays.Parent = Lighting
+end
+
+------------------------------------------------------------------------------
+-- Scenery
+------------------------------------------------------------------------------
+
+local function buildTree(parent: Instance, position: Vector3, scale: number, rng: Random)
+	local trunkHeight = 8 * scale
+	cylinder(
+		parent,
+		"Trunk",
+		trunkHeight,
+		1.6 * scale,
+		CFrame.new(position + Vector3.new(0, trunkHeight / 2, 0)),
+		rgb(110, 78, 54),
+		Enum.Material.Wood
+	)
+	local greens = { rgb(70, 150, 66), rgb(84, 166, 74), rgb(62, 138, 60) }
+	for i = 1, 3 do
+		local offset = Vector3.new(rng:NextNumber(-2, 2), trunkHeight + rng:NextNumber(0, 3.5), rng:NextNumber(-2, 2))
+			* scale
+		local size = Vector3.new(8, 6.5, 8) * scale * rng:NextNumber(0.8, 1.1)
+		local canopy = ball(parent, "Canopy", size, CFrame.new(position + offset), greens[i], Enum.Material.Grass)
+		canopy.CanCollide = false
+	end
+end
+
+local function buildScenery(world: Folder, rng: Random)
+	local ground = part(world, "Ground", Vector3.new(900, 2, 900), CFrame.new(0, -1, 0), GRASS, Enum.Material.Grass)
+	ground.Name = "Ground"
+
+	-- A ring of trees around the whole map, plus a few between the gardens.
+	local scenery = Instance.new("Folder")
+	scenery.Name = "Trees"
+	scenery.Parent = world
+	for i = 1, 56 do
+		local angle = i / 56 * math.pi * 2 + rng:NextNumber(-0.04, 0.04)
+		local radius = rng:NextNumber(205, 245)
+		buildTree(
+			scenery,
+			Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius),
+			rng:NextNumber(1.2, 2.0),
+			rng
+		)
+	end
+	for i = 1, Config.MAX_GARDENS do
+		-- between two neighbouring gardens
+		local angle = (i - 0.5) / Config.MAX_GARDENS * math.pi * 2
+		buildTree(scenery, Vector3.new(math.cos(angle) * 128, 0, math.sin(angle) * 128), rng:NextNumber(1.1, 1.5), rng)
+	end
+end
+
+local function buildHub(world: Folder)
+	local hub = Instance.new("Model")
+	hub.Name = "Hub"
+	hub.Parent = world
+
+	cylinder(hub, "Plaza", TOP, 88, CFrame.new(0, TOP / 2, 0), rgb(206, 198, 182), Enum.Material.Cobblestone)
+	cylinder(
+		hub,
+		"PlazaInner",
+		TOP + 0.04,
+		58,
+		CFrame.new(0, (TOP + 0.04) / 2, 0),
+		rgb(224, 214, 190),
+		Enum.Material.Slate
+	)
+
+	-- Paths from the plaza to each garden entrance
+	for slot = 1, Config.MAX_GARDENS do
+		local angle = (slot - 1) / Config.MAX_GARDENS * math.pi * 2
+		local dir = Vector3.new(math.cos(angle), 0, math.sin(angle))
+		local from, to = 40, GARDEN_RADIUS - 29
+		local center = dir * ((from + to) / 2)
+		part(
+			hub,
+			"Path",
+			Vector3.new(9, TOP, to - from),
+			CFrame.lookAt(center + Vector3.new(0, TOP / 2, 0), Vector3.new(0, TOP / 2, 0)),
+			rgb(214, 190, 150),
+			Enum.Material.Sand
+		)
+	end
+
+	-- Seed shop kiosk
+	local shop = Instance.new("Model")
+	shop.Name = "SeedShop"
+	shop.Parent = hub
+	local counter = cylinder(shop, "Counter", 4, 12, CFrame.new(0, TOP + 2, 0), WOOD, Enum.Material.Wood)
+	cylinder(shop, "CounterTop", 0.5, 13.5, CFrame.new(0, TOP + 4.25, 0), rgb(240, 220, 176), Enum.Material.WoodPlanks)
+	for i = 0, 3 do
+		local a = i / 4 * math.pi * 2 + math.pi / 4
+		part(
+			shop,
+			"Post",
+			Vector3.new(0.8, 8, 0.8),
+			CFrame.new(math.cos(a) * 5.4, TOP + 8.5, math.sin(a) * 5.4),
+			rgb(220, 196, 150),
+			Enum.Material.Wood
+		)
+	end
+	cylinder(shop, "Roof", 0.8, 17, CFrame.new(0, TOP + 12.9, 0), rgb(206, 72, 62), Enum.Material.SmoothPlastic)
+	cylinder(shop, "RoofTrim", 0.9, 14, CFrame.new(0, TOP + 12.9, 0), rgb(246, 240, 230), Enum.Material.SmoothPlastic)
+	cylinder(shop, "RoofTop", 1.4, 6, CFrame.new(0, TOP + 14, 0), rgb(206, 72, 62), Enum.Material.SmoothPlastic)
+	-- jars of every seed on the counter
+	for i, seed in Seeds.list do
+		local a = i / #Seeds.list * math.pi * 2
+		ball(
+			shop,
+			"SeedJar",
+			Vector3.new(1.5, 1.5, 1.5),
+			CFrame.new(math.cos(a) * 4.2, TOP + 5.3, math.sin(a) * 4.2),
+			seed.color,
+			Enum.Material.Neon
+		)
+	end
+	prompt(counter, "ShopPrompt", "Browse Seeds", "Seed Shop")
+	billboardText(counter, "SEED SHOP", Vector3.new(0, 17, 0), 300, 70)
+
+	-- Birdpedia board
+	local boardPos = Vector3.new(24, 0, 24)
+	local boardCF = CFrame.lookAt(Vector3.new(boardPos.X, TOP + 6.5, boardPos.Z), Vector3.new(0, TOP + 6.5, 0))
+	local board = part(hub, "BirdpediaBoard", Vector3.new(13, 5.5, 0.6), boardCF, rgb(86, 120, 98), Enum.Material.Wood)
+	for _, x in { -5.5, 5.5 } do
+		part(hub, "BoardPost", Vector3.new(0.9, 7, 0.9), boardCF * CFrame.new(x, -2.2, 0.2), WOOD, Enum.Material.Wood)
+	end
+	surfaceText(board, Enum.NormalId.Front, "BIRDPEDIA\nSee every bird you've attracted", CREAM, 30)
+	prompt(board, "BirdpediaPrompt", "Open Birdpedia", "Field Guide")
+
+	-- Hub spawn (players are moved to their own garden once their data loads)
+	local spawn = Instance.new("SpawnLocation")
+	spawn.Name = "HubSpawn"
+	spawn.Size = Vector3.new(10, 0.2, 10)
+	spawn.CFrame = CFrame.new(0, TOP + 0.1, 32)
+	spawn.Anchored = true
+	spawn.Neutral = true
+	spawn.CanCollide = false
+	spawn.Transparency = 1
+	spawn.Duration = 0
+	spawn.Parent = hub
+end
+
+------------------------------------------------------------------------------
+-- Gardens
+------------------------------------------------------------------------------
+
+local function buildGarden(slot: number, parent: Folder): Garden
+	local angle = (slot - 1) / Config.MAX_GARDENS * math.pi * 2
+	local center = Vector3.new(math.cos(angle) * GARDEN_RADIUS, 0, math.sin(angle) * GARDEN_RADIUS)
+	-- local -Z points at the hub, so the entrance is on the hub side
+	local origin = CFrame.lookAt(center, Vector3.zero)
+	local function at(x: number, y: number, z: number): CFrame
+		return origin * CFrame.new(x, y, z)
+	end
+
+	local model = Instance.new("Model")
+	model.Name = "Garden_" .. slot
+	model:SetAttribute("Slot", slot)
+	model:SetAttribute("OwnerUserId", 0)
+	model.Parent = parent
+
+	part(model, "Pad", Vector3.new(60, TOP, 58), at(0, TOP / 2, 0), rgb(112, 184, 92), Enum.Material.Grass)
+
+	-- soil plots, row by row from the entrance outwards
+	local plots: { Part } = {}
+	local lockGuis: { SurfaceGui } = {}
+	for row = 1, Config.PLOT_ROWS do
+		for col = 1, Config.PLOT_COLUMNS do
+			local index = (row - 1) * Config.PLOT_COLUMNS + col
+			local x = (col - (Config.PLOT_COLUMNS + 1) / 2) * PLOT_PITCH
+			local z = -9 + (row - 1) * PLOT_PITCH
+			local soil = part(
+				model,
+				"Plot_" .. index,
+				Vector3.new(PLOT_SIZE, 0.5, PLOT_SIZE),
+				at(x, TOP + 0.25, z),
+				rgb(116, 118, 124),
+				Enum.Material.Slate
+			)
+			soil:SetAttribute("Index", index)
+			soil:SetAttribute("Locked", true)
+			soil:SetAttribute("HasPlant", false)
+			local gui, label = surfaceText(soil, Enum.NormalId.Top, "LOCKED", rgb(210, 214, 222), 24)
+			label.TextTransparency = 0.25
+			plots[index] = soil
+			lockGuis[index] = gui
+		end
+	end
+
+	-- fence with a gap at the entrance
+	local rail = Vector3.new(0.6, 1.4, 58)
+	part(model, "FenceL", rail, at(-30, TOP + 0.7, 0), WOOD, Enum.Material.Wood)
+	part(model, "FenceR", rail, at(30, TOP + 0.7, 0), WOOD, Enum.Material.Wood)
+	part(model, "FenceBack", Vector3.new(60.6, 1.4, 0.6), at(0, TOP + 0.7, 29), WOOD, Enum.Material.Wood)
+	part(model, "FenceFrontL", Vector3.new(22, 1.4, 0.6), at(-19, TOP + 0.7, -29), WOOD, Enum.Material.Wood)
+	part(model, "FenceFrontR", Vector3.new(22, 1.4, 0.6), at(19, TOP + 0.7, -29), WOOD, Enum.Material.Wood)
+
+	-- entrance arch with the owner's name
+	part(model, "ArchPostL", Vector3.new(0.9, 7.5, 0.9), at(-8.5, TOP + 3.75, -29), WOOD, Enum.Material.Wood)
+	part(model, "ArchPostR", Vector3.new(0.9, 7.5, 0.9), at(8.5, TOP + 3.75, -29), WOOD, Enum.Material.Wood)
+	part(model, "ArchBeam", Vector3.new(18.8, 1, 1), at(0, TOP + 8, -29), WOOD, Enum.Material.Wood)
+	local sign =
+		part(model, "Sign", Vector3.new(13, 3.4, 0.5), at(0, TOP + 10.2, -29), rgb(94, 128, 100), Enum.Material.Wood)
+	part(model, "SignStrut", Vector3.new(0.5, 1.8, 0.5), at(-4, TOP + 8.9, -29), WOOD, Enum.Material.Wood)
+	part(model, "SignStrut", Vector3.new(0.5, 1.8, 0.5), at(4, TOP + 8.9, -29), WOOD, Enum.Material.Wood)
+	local signLabels: { TextLabel } = {}
+	for _, face in { Enum.NormalId.Front, Enum.NormalId.Back } do
+		local _, label = surfaceText(sign, face, "Free Garden", CREAM, 40)
+		table.insert(signLabels, label)
+	end
+
+	-- decorative bird bath at the back
+	cylinder(model, "BathBase", 2.2, 1.8, at(0, TOP + 1.1, 25), rgb(200, 196, 188), Enum.Material.Marble)
+	cylinder(model, "BathBowl", 0.9, 5, at(0, TOP + 2.6, 25), rgb(214, 210, 202), Enum.Material.Marble)
+	local water =
+		cylinder(model, "BathWater", 0.12, 4.2, at(0, TOP + 3.1, 25), rgb(120, 190, 255), Enum.Material.Glass, false)
+	water.Transparency = 0.25
+
+	local spawnCF = at(0, TOP + 3.5, -21) * CFrame.Angles(0, math.pi, 0)
+
+	return {
+		slot = slot,
+		model = model,
+		origin = origin,
+		spawnCF = spawnCF,
+		plots = plots,
+		lockGuis = lockGuis,
+		signLabels = signLabels,
+		owner = nil,
+	}
+end
+
+function WorldBuilder.build(): World
+	WorldBuilder.setupLighting()
+
+	local worldFolder = Instance.new("Folder")
+	worldFolder.Name = "World"
+	worldFolder.Parent = workspace
+	local rng = Random.new(2024)
+	buildScenery(worldFolder, rng)
+	buildHub(worldFolder)
+
+	local gardensFolder = Instance.new("Folder")
+	gardensFolder.Name = "Gardens"
+	gardensFolder.Parent = workspace
+	local gardens: { Garden } = {}
+	for slot = 1, Config.MAX_GARDENS do
+		gardens[slot] = buildGarden(slot, gardensFolder)
+	end
+
+	local plants = Instance.new("Folder")
+	plants.Name = "Plants"
+	plants.Parent = workspace
+
+	return { gardens = gardens, plantsFolder = plants }
+end
+
+return WorldBuilder
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="StarterPlayer" referent="25">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="26">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="LocalScript" referent="27">
+        <Properties>
+          <string name="Name">Client</string>
+          <string name="Source"><![CDATA[--!strict
+-- Grow a Bird Garden - client entry point.
+
+local Players = game:GetService("Players")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Remotes = require(Shared:WaitForChild("Remotes")).get()
+
+local BirdRenderer = require(script.BirdRenderer)
+local BirdpediaUI = require(script.BirdpediaUI)
+local DevPanel = require(script.DevPanel)
+local Hotbar = require(script.Hotbar)
+local Hud = require(script.Hud)
+local Objective = require(script.Objective)
+local PlantLabels = require(script.PlantLabels)
+local Prompts = require(script.Prompts)
+local ShopUI = require(script.ShopUI)
+local State = require(script.State)
+local Toasts = require(script.Toasts)
+local Ui = require(script.Ui)
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Ask the server for everything we need (it replies once our garden is ready).
+local init: any = nil
+for _ = 1, 5 do
+	local ok, result = pcall(function()
+		return Remotes.Init:InvokeServer()
+	end)
+	if ok and result then
+		init = result
+		break
+	end
+	task.wait(2)
+end
+if not init then
+	warn("[BirdGarden] Could not load game data from the server.")
+	return
+end
+
+State.apply(init.state)
+State.setStock(init.stock)
+
+local gui = Ui.new("ScreenGui", {
+	Name = "BirdGardenUI",
+	ResetOnSpawn = false,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	DisplayOrder = 5,
+	Parent = playerGui,
+})
+
+Toasts.init(gui)
+Hud.init(gui, ShopUI.toggle, BirdpediaUI.toggle)
+Objective.init(gui)
+Hotbar.init(gui)
+ShopUI.init(gui)
+BirdpediaUI.init(gui)
+DevPanel.init(gui)
+PlantLabels.init()
+Prompts.init()
+BirdRenderer.init(init.visits)
+
+Remotes.StateUpdate.OnClientEvent:Connect(State.apply)
+Remotes.StockUpdate.OnClientEvent:Connect(State.setStock)
+Remotes.Notify.OnClientEvent:Connect(Toasts.handle)
+Remotes.BirdVisit.OnClientEvent:Connect(BirdRenderer.add)
+Remotes.BirdCancel.OnClientEvent:Connect(BirdRenderer.remove)
+
+-- The kiosk and the field-guide board in the plaza open the matching window.
+ProximityPromptService.PromptTriggered:Connect(function(prompt: ProximityPrompt)
+	if prompt.Name == "ShopPrompt" then
+		ShopUI.open()
+	elseif prompt.Name == "BirdpediaPrompt" then
+		BirdpediaUI.open()
+	end
+end)
+
+UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
+	if not processed and input.KeyCode == Enum.KeyCode.B then
+		BirdpediaUI.toggle()
+	end
+end)
+]]></string>
+        </Properties>
+        <Item class="ModuleScript" referent="28">
+          <Properties>
+            <string name="Name">BirdRenderer</string>
+            <string name="Source"><![CDATA[--!strict
+-- Draws every bird visit. The server only sends a tiny description of each
+-- visit; this module animates the bird locally from BirdFlight, so birds are
+-- perfectly smooth and cost nothing in network traffic.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local BirdFlight = require(Shared:WaitForChild("BirdFlight"))
+local BirdModel = require(Shared:WaitForChild("BirdModel"))
+local Birds = require(Shared:WaitForChild("Birds"))
+local Clock = require(Shared:WaitForChild("Clock"))
+local Config = require(Shared:WaitForChild("Config"))
+local Types = require(Shared:WaitForChild("Types"))
+
+local Ui = require(script.Parent.Ui)
+
+local BirdRenderer = {}
+
+type Active = {
+	info: Types.VisitInfo,
+	rig: BirdModel.Rig,
+	duration: number,
+	attached: boolean,
+	flap: number,
+	wingPhase: number,
+	nameGui: BillboardGui,
+}
+
+local CULL_DISTANCE = 260 -- birds further than this aren't drawn at all
+
+local active: { [number]: Active } = {}
+local folder: Folder
+
+local function destroy(id: number)
+	local bird = active[id]
+	if bird then
+		active[id] = nil
+		bird.rig.model:Destroy()
+	end
+end
+
+function BirdRenderer.add(info: Types.VisitInfo)
+	if active[info.id] then
+		return
+	end
+	local def = Birds.get(info.birdId)
+	if not def then
+		return
+	end
+	local duration = BirdFlight.duration(info)
+	if Clock.now() - info.startTime >= duration then
+		return -- this visit is already over
+	end
+
+	local rig = BirdModel.build(def)
+	local color = Config.RARITY_COLORS[def.rarity]
+	local gui = Ui.new("BillboardGui", {
+		Name = "NameTag",
+		Size = UDim2.fromOffset(150, 26),
+		StudsOffsetWorldSpace = Vector3.new(0, rig.height + 1.1, 0),
+		MaxDistance = 55,
+		LightInfluence = 0,
+		Adornee = rig.model.PrimaryPart,
+		Parent = rig.model.PrimaryPart,
+	})
+	Ui.label({
+		Size = UDim2.fromScale(1, 1),
+		Text = def.name,
+		Font = Ui.FONT,
+		TextSize = 17,
+		TextColor3 = color,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextStrokeTransparency = 0.25,
+		Parent = gui,
+	})
+
+	active[info.id] = {
+		info = info,
+		rig = rig,
+		duration = duration,
+		attached = false,
+		flap = 1,
+		wingPhase = info.seed,
+		nameGui = gui,
+	}
+end
+
+function BirdRenderer.remove(id: number)
+	destroy(id)
+end
+
+local function step(dt: number)
+	local camera = workspace.CurrentCamera
+	local cameraPosition = if camera then camera.CFrame.Position else Vector3.zero
+	local now = Clock.now()
+
+	for id, bird in active do
+		local t = now - bird.info.startTime
+		if t >= bird.duration then
+			destroy(id)
+		else
+			local sample = BirdFlight.sample(bird.info, t)
+			if (sample.position - cameraPosition).Magnitude > CULL_DISTANCE then
+				if bird.attached then
+					bird.attached = false
+					bird.rig.model.Parent = nil
+				end
+			else
+				-- ease the wings between folded (perched) and beating (flying)
+				bird.flap += (sample.flap - bird.flap) * math.min(1, dt * 10)
+				bird.wingPhase += dt * bird.rig.flapRate
+				local angle = bird.flap * (1.25 + 0.95 * math.sin(bird.wingPhase))
+
+				local look = sample.look
+				if math.abs(look.Y) > 0.98 then
+					look = Vector3.new(look.X + 0.05, look.Y, look.Z)
+				end
+				BirdModel.pose(bird.rig, CFrame.lookAt(sample.position, sample.position + look), angle)
+
+				bird.nameGui.Enabled = sample.phase ~= "leave"
+				if not bird.attached then
+					bird.attached = true
+					bird.rig.model.Parent = folder
+				end
+			end
+		end
+	end
+end
+
+function BirdRenderer.init(initialVisits: { Types.VisitInfo })
+	folder = Ui.new("Folder", { Name = "ClientBirds", Parent = workspace })
+	for _, info in initialVisits do
+		BirdRenderer.add(info)
+	end
+	RunService.RenderStepped:Connect(step)
+end
+
+return BirdRenderer
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="29">
+          <Properties>
+            <string name="Name">BirdpediaUI</string>
+            <string name="Source"><![CDATA[--!strict
+-- The field guide: every species in the game. Birds you haven't seen yet are
+-- silhouettes with a hint about which seed attracts them.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local BirdModel = require(Shared:WaitForChild("BirdModel"))
+local Birds = require(Shared:WaitForChild("Birds"))
+local Config = require(Shared:WaitForChild("Config"))
+local Format = require(Shared:WaitForChild("Format"))
+local Seeds = require(Shared:WaitForChild("Seeds"))
+local Types = require(Shared:WaitForChild("Types"))
+
+local State = require(script.Parent.State)
+local Ui = require(script.Parent.Ui)
+local Viewport = require(script.Parent.Viewport)
+
+local BirdpediaUI = {}
+
+type Card = {
+	def: Types.BirdDef,
+	viewport: ViewportFrame,
+	name: TextLabel,
+	detail: TextLabel,
+	discovered: boolean?, -- what the viewport currently shows
+}
+
+local overlay: TextButton
+local header: TextLabel
+local listFrame: ScrollingFrame
+local cards: { Card } = {}
+local built = false
+
+-- The seed that most likely brings this bird (highest weight wins).
+local function hintSeed(birdId: string): Types.SeedDef?
+	local best: Types.SeedDef? = nil
+	local bestWeight = 0
+	for _, seed in Seeds.list do
+		for _, entry in seed.birds do
+			if entry.id == birdId and entry.weight > bestWeight then
+				best, bestWeight = seed, entry.weight
+			end
+		end
+	end
+	return best
+end
+
+local function refresh()
+	if not built then
+		return
+	end
+	header.Text = `Birdpedia   {State.speciesDiscovered()} / {#Birds.list} discovered   -   {Format.commas(
+		State.totalVisits
+	)} visits`
+	for _, card in cards do
+		local seen = State.birds[card.def.id]
+		local discovered = seen ~= nil
+		local color = Config.RARITY_COLORS[card.def.rarity]
+
+		if card.discovered ~= discovered then
+			card.discovered = discovered
+			Viewport.mount(card.viewport, BirdModel.build(card.def, not discovered).model)
+		end
+		if discovered then
+			card.name.Text = card.def.name
+			card.name.TextColor3 = color
+			card.detail.Text = `Seen x{seen}\n{Format.feathers(card.def.value)} per visit`
+			card.detail.TextColor3 = Ui.COLORS.text
+		else
+			card.name.Text = "???"
+			card.name.TextColor3 = Ui.COLORS.muted
+			local seed = hintSeed(card.def.id)
+			card.detail.Text = `{card.def.rarity}\nTry: {if seed then seed.name else "?"}`
+			card.detail.TextColor3 = Ui.COLORS.muted
+		end
+	end
+end
+
+local function buildCards(list: Instance)
+	for _, def in Birds.list do
+		local color = Config.RARITY_COLORS[def.rarity]
+		local frame = Ui.new(
+			"Frame",
+			{ Name = def.id, BackgroundColor3 = Ui.COLORS.row, Parent = list },
+			{ Ui.corner(14), Ui.stroke(color, 2, 0.4) }
+		)
+		Ui.new(
+			"Frame",
+			{ Size = UDim2.new(1, 0, 0, 5), BackgroundColor3 = color, BorderSizePixel = 0, Parent = frame },
+			{ Ui.corner(3) }
+		)
+		local viewport = Ui.new("ViewportFrame", {
+			Position = UDim2.fromOffset(10, 12),
+			Size = UDim2.new(1, -20, 0, 96),
+			BackgroundColor3 = Ui.COLORS.bg,
+			BackgroundTransparency = 0,
+			Parent = frame,
+		}, { Ui.corner(10) })
+		local name = Ui.label({
+			Position = UDim2.fromOffset(6, 112),
+			Size = UDim2.new(1, -12, 0, 22),
+			Font = Ui.FONT,
+			TextSize = 17,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			Parent = frame,
+		})
+		local detail = Ui.label({
+			Position = UDim2.fromOffset(6, 136),
+			Size = UDim2.new(1, -12, 0, 32),
+			Font = Ui.FONT_BOLD,
+			TextSize = 12,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			TextWrapped = true,
+			Parent = frame,
+		})
+		table.insert(cards, { def = def, viewport = viewport, name = name, detail = detail, discovered = nil })
+	end
+end
+
+function BirdpediaUI.close()
+	overlay.Visible = false
+end
+
+function BirdpediaUI.open()
+	if overlay.Visible then
+		return
+	end
+	overlay.Visible = true
+	if not built then
+		built = true
+		buildCards(listFrame)
+	end
+	refresh()
+end
+
+function BirdpediaUI.toggle()
+	if overlay.Visible then
+		BirdpediaUI.close()
+	else
+		BirdpediaUI.open()
+	end
+end
+
+function BirdpediaUI.init(gui: ScreenGui)
+	overlay = Ui.new("TextButton", {
+		Name = "BirdpediaOverlay",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.5,
+		AutoButtonColor = false,
+		Text = "",
+		Visible = false,
+		ZIndex = 10,
+		Parent = gui,
+	})
+	overlay.Activated:Connect(BirdpediaUI.close)
+
+	local panel = Ui.new("Frame", {
+		Name = "Panel",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(0.86, 0.84),
+		BackgroundColor3 = Ui.COLORS.panel,
+		Active = true,
+		Parent = overlay,
+	}, {
+		Ui.corner(20),
+		Ui.stroke(Color3.fromRGB(70, 130, 196), 4),
+		Ui.new("UISizeConstraint", { MaxSize = Vector2.new(860, 600), MinSize = Vector2.new(300, 280) }),
+	})
+
+	header = Ui.label({
+		Position = UDim2.fromOffset(20, 12),
+		Size = UDim2.new(1, -80, 0, 34),
+		Text = "Birdpedia",
+		Font = Ui.FONT,
+		TextSize = 24,
+		TextColor3 = Ui.COLORS.gold,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = panel,
+	})
+	Ui.label({
+		Position = UDim2.fromOffset(22, 44),
+		Size = UDim2.new(1, -80, 0, 18),
+		Text = "Plant better seeds to attract rarer birds. Discovering a new species pays a big bonus!",
+		TextSize = 13,
+		TextColor3 = Ui.COLORS.muted,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = panel,
+	})
+
+	local close = Ui.button({
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -14, 0, 14),
+		Size = UDim2.fromOffset(40, 40),
+		Text = "X",
+		BackgroundColor3 = Ui.COLORS.bad,
+		Parent = panel,
+	})
+	close.Activated:Connect(BirdpediaUI.close)
+
+	listFrame = Ui.new("ScrollingFrame", {
+		Name = "List",
+		Position = UDim2.fromOffset(12, 72),
+		Size = UDim2.new(1, -24, 1, -84),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 6,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Parent = panel,
+	}, {
+		Ui.new("UIGridLayout", {
+			CellSize = UDim2.fromOffset(138, 176),
+			CellPadding = UDim2.fromOffset(10, 10),
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+		Ui.new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 8) }),
+	})
+
+	State.changed:Connect(refresh)
+end
+
+return BirdpediaUI
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="30">
+          <Properties>
+            <string name="Name">DevPanel</string>
+            <string name="Source"><![CDATA[--!strict
+-- Studio-only cheat buttons for testing. Never appears in a published game.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Remotes = require(Shared:WaitForChild("Remotes")).get()
+
+local Ui = require(script.Parent.Ui)
+
+local DevPanel = {}
+
+function DevPanel.init(gui: ScreenGui)
+	if not RunService:IsStudio() then
+		return
+	end
+
+	local panel = Ui.new("Frame", {
+		Name = "DevPanel",
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -12, 0.5, 0),
+		Size = UDim2.fromOffset(150, 220),
+		BackgroundColor3 = Ui.COLORS.bg,
+		BackgroundTransparency = 0.15,
+		Parent = gui,
+	}, {
+		Ui.corner(12),
+		Ui.stroke(Ui.COLORS.bad, 2),
+		Ui.padding(8),
+		Ui.new("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }),
+	})
+	Ui.label({
+		LayoutOrder = 0,
+		Size = UDim2.new(1, 0, 0, 18),
+		Text = "DEV (Studio only)",
+		Font = Ui.FONT_BOLD,
+		TextSize = 12,
+		TextColor3 = Ui.COLORS.bad,
+		Parent = panel,
+	})
+
+	local actions = {
+		{ "feathers", "+100K Feathers" },
+		{ "seeds", "+5 of every seed" },
+		{ "grow", "Grow all plants" },
+		{ "plots", "Unlock all plots" },
+		{ "stock", "Fill shop stock" },
+	}
+	for i, entry in actions do
+		local button = Ui.button({
+			LayoutOrder = i,
+			Size = UDim2.new(1, 0, 0, 32),
+			Text = entry[2],
+			TextSize = 13,
+			Parent = panel,
+		})
+		button.Activated:Connect(function()
+			Remotes.Dev:FireServer(entry[1])
+		end)
+	end
+end
+
+return DevPanel
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="31">
+          <Properties>
+            <string name="Name">Hotbar</string>
+            <string name="Source"><![CDATA[--!strict
+-- The seed bar along the bottom. Click a slot or press 1-6 to pick the seed
+-- you'll plant next.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared:WaitForChild("Config"))
+local Format = require(Shared:WaitForChild("Format"))
+local PlantModels = require(Shared:WaitForChild("PlantModels"))
+local Seeds = require(Shared:WaitForChild("Seeds"))
+
+local State = require(script.Parent.State)
+local Ui = require(script.Parent.Ui)
+local Viewport = require(script.Parent.Viewport)
+
+local Hotbar = {}
+
+type Slot = {
+	frame: Frame,
+	stroke: UIStroke,
+	scale: UIScale,
+	count: TextLabel,
+	key: TextLabel,
+}
+
+local KEYS = {
+	[Enum.KeyCode.One] = 1,
+	[Enum.KeyCode.Two] = 2,
+	[Enum.KeyCode.Three] = 3,
+	[Enum.KeyCode.Four] = 4,
+	[Enum.KeyCode.Five] = 5,
+	[Enum.KeyCode.Six] = 6,
+}
+
+function Hotbar.init(gui: ScreenGui)
+	-- A full-width transparent strip; the slots are centred inside it by a list layout.
+	local root = Ui.new("Frame", {
+		Name = "Hotbar",
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, -14),
+		Size = UDim2.new(1, 0, 0, 104),
+		BackgroundTransparency = 1,
+		Parent = gui,
+	})
+	local hint = Ui.label({
+		Name = "Hint",
+		Position = UDim2.fromOffset(0, 0),
+		Size = UDim2.new(1, 0, 0, 22),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Font = Ui.FONT_BOLD,
+		TextSize = 14,
+		TextStrokeTransparency = 0.5,
+		Parent = root,
+	})
+	local row = Ui.new("Frame", {
+		Name = "Slots",
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 0, 1, 0),
+		Size = UDim2.new(1, 0, 0, 80),
+		BackgroundTransparency = 1,
+		Parent = root,
+	}, {
+		Ui.new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			VerticalAlignment = Enum.VerticalAlignment.Bottom,
+			Padding = UDim.new(0, 8),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+	})
+
+	local slots: { [string]: Slot } = {}
+	for _, seed in Seeds.list do
+		local color = Config.RARITY_COLORS[seed.rarity]
+		local frame = Ui.new("Frame", {
+			Name = seed.id,
+			LayoutOrder = seed.tier,
+			Size = UDim2.fromOffset(68, 68),
+			BackgroundColor3 = Ui.COLORS.bg,
+			Visible = false,
+			Parent = row,
+		}, { Ui.corner(14) })
+		local stroke = Ui.stroke(color, 2)
+		stroke.Parent = frame
+		local scale = Ui.new("UIScale", { Parent = frame })
+
+		local preview = Ui.new("ViewportFrame", { Size = UDim2.fromScale(1, 1), Parent = frame })
+		local model = PlantModels.build(seed.id, CFrame.new(), true)
+		if model then
+			Viewport.mount(preview, model, Vector3.new(0.4, 0.3, -1))
+		end
+
+		local count = Ui.label({
+			AnchorPoint = Vector2.new(1, 1),
+			Position = UDim2.new(1, -5, 1, -3),
+			Size = UDim2.fromOffset(40, 18),
+			TextXAlignment = Enum.TextXAlignment.Right,
+			Font = Ui.FONT,
+			TextSize = 17,
+			TextStrokeTransparency = 0.3,
+			ZIndex = 3,
+			Parent = frame,
+		})
+		local key = Ui.label({
+			Position = UDim2.fromOffset(6, 3),
+			Size = UDim2.fromOffset(20, 16),
+			Font = Ui.FONT_BOLD,
+			TextSize = 13,
+			TextColor3 = Ui.COLORS.muted,
+			TextStrokeTransparency = 0.5,
+			ZIndex = 3,
+			Parent = frame,
+		})
+
+		local click = Ui.new(
+			"TextButton",
+			{ Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", ZIndex = 4, Parent = frame }
+		)
+		click.Activated:Connect(function()
+			State.select(seed.id)
+		end)
+
+		slots[seed.id] = { frame = frame, stroke = stroke, scale = scale, count = count, key = key }
+	end
+
+	local visibleOrder: { string } = {}
+	local function refresh()
+		visibleOrder = {}
+		for _, seed in Seeds.list do
+			local slot = slots[seed.id]
+			local owned = State.seedCount(seed.id)
+			slot.frame.Visible = owned > 0
+			if owned > 0 then
+				table.insert(visibleOrder, seed.id)
+				slot.count.Text = "x" .. Format.commas(owned)
+				slot.key.Text = tostring(#visibleOrder)
+				local selected = State.selected == seed.id
+				slot.stroke.Color = if selected then Ui.COLORS.gold else Config.RARITY_COLORS[seed.rarity]
+				slot.stroke.Thickness = if selected then 4 else 2
+				slot.scale.Scale = if selected then 1.12 else 1
+			end
+		end
+		local selected = State.selected and Seeds.get(State.selected)
+		if selected then
+			hint.Text = `{selected.name}  -  grows in {Format.growTime(selected.growTime)}`
+			hint.TextColor3 = Config.RARITY_COLORS[selected.rarity]
+		else
+			hint.Text = ""
+		end
+	end
+
+	State.changed:Connect(refresh)
+	State.selectedChanged:Connect(refresh)
+	refresh()
+
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then
+			return
+		end
+		local position = KEYS[input.KeyCode]
+		local id = if position then visibleOrder[position] else nil
+		if id then
+			State.select(id)
+		end
+	end)
+end
+
+return Hotbar
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="32">
+          <Properties>
+            <string name="Name">Hud</string>
+            <string name="Source"><![CDATA[--!strict
+-- Always-on screen elements: the feathers counter and the Shop / Birdpedia buttons.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Birds = require(Shared:WaitForChild("Birds"))
+local Format = require(Shared:WaitForChild("Format"))
+
+local State = require(script.Parent.State)
+local Ui = require(script.Parent.Ui)
+
+local Hud = {}
+
+function Hud.init(gui: ScreenGui, onShop: () -> (), onBirdpedia: () -> ())
+	-- feathers counter
+	local pill = Ui.new("Frame", {
+		Name = "Feathers",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 8),
+		Size = UDim2.fromOffset(250, 44),
+		BackgroundColor3 = Ui.COLORS.bg,
+		Parent = gui,
+	}, { Ui.corner(22), Ui.stroke(Ui.COLORS.gold, 2.5) })
+	local scale = Ui.new("UIScale", { Parent = pill })
+	Ui.label({
+		Position = UDim2.fromOffset(16, 0),
+		Size = UDim2.new(0, 90, 1, 0),
+		Text = "FEATHERS",
+		Font = Ui.FONT_BOLD,
+		TextSize = 13,
+		TextColor3 = Ui.COLORS.muted,
+		Parent = pill,
+	})
+	local amount = Ui.label({
+		Position = UDim2.fromOffset(100, 0),
+		Size = UDim2.new(1, -116, 1, 0),
+		Text = "0",
+		Font = Ui.FONT,
+		TextSize = 26,
+		TextColor3 = Ui.COLORS.gold,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = pill,
+	})
+
+	-- side buttons
+	local side = Ui.new("Frame", {
+		Name = "SideButtons",
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 12, 0.5, 0),
+		Size = UDim2.fromOffset(150, 120),
+		BackgroundTransparency = 1,
+		Parent = gui,
+	}, { Ui.new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }) })
+
+	local shopButton = Ui.button({
+		Name = "Shop",
+		LayoutOrder = 1,
+		Size = UDim2.new(1, 0, 0, 54),
+		Text = "Seed Shop",
+		BackgroundColor3 = Color3.fromRGB(214, 112, 60),
+		Parent = side,
+	})
+	local pediaButton = Ui.button({
+		Name = "Birdpedia",
+		LayoutOrder = 2,
+		Size = UDim2.new(1, 0, 0, 54),
+		Text = "Birdpedia",
+		BackgroundColor3 = Color3.fromRGB(70, 130, 196),
+		Parent = side,
+	})
+	Ui.stroke(Color3.fromRGB(0, 0, 0), 2, 0.6).Parent = shopButton
+	Ui.stroke(Color3.fromRGB(0, 0, 0), 2, 0.6).Parent = pediaButton
+	shopButton.Activated:Connect(onShop)
+	pediaButton.Activated:Connect(onBirdpedia)
+
+	local lastFeathers = State.feathers
+	local function refresh()
+		amount.Text = Format.feathers(State.feathers)
+		pediaButton.Text = `Birdpedia {State.speciesDiscovered()}/{#Birds.list}`
+		if State.feathers > lastFeathers then
+			scale.Scale = 1.12
+			TweenService
+				:Create(scale, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 })
+				:Play()
+		end
+		lastFeathers = State.feathers
+	end
+	State.changed:Connect(refresh)
+	refresh()
+end
+
+return Hud
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="33">
+          <Properties>
+            <string name="Name">Objective</string>
+            <string name="Source"><![CDATA[--!strict
+-- A single line that tells the player what to do next. This is the "player
+-- waits" loop made visible: plant, wait, watch the birds, upgrade.
+
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Birds = require(Shared:WaitForChild("Birds"))
+local Clock = require(Shared:WaitForChild("Clock"))
+local Format = require(Shared:WaitForChild("Format"))
+local Seeds = require(Shared:WaitForChild("Seeds"))
+
+local State = require(script.Parent.State)
+local Ui = require(script.Parent.Ui)
+
+local Objective = {}
+
+local label: TextLabel
+local localPlayer = Players.LocalPlayer
+
+-- Looks at the local player's plants: how many are growing / blooming, and how long until the next bloom.
+local function scanPlants(): (number, number, string?, number?)
+	local growing, blooming = 0, 0
+	local soonestName: string? = nil
+	local soonest: number? = nil
+	local now = Clock.now()
+	for _, plant in CollectionService:GetTagged("Plant") do
+		if plant:GetAttribute("OwnerUserId") == localPlayer.UserId then
+			local plantedAt = plant:GetAttribute("PlantedAt")
+			local growTime = plant:GetAttribute("GrowTime")
+			local seed = Seeds.get(tostring(plant:GetAttribute("SeedId")))
+			if type(plantedAt) == "number" and type(growTime) == "number" and seed then
+				local remaining = growTime - (now - plantedAt)
+				if remaining > 0 then
+					growing += 1
+					if not soonest or remaining < soonest then
+						soonest, soonestName = remaining, seed.name
+					end
+				else
+					blooming += 1
+				end
+			end
+		end
+	end
+	return growing, blooming, soonestName, soonest
+end
+
+local function compute(): string
+	local growing, blooming, soonestName, soonest = scanPlants()
+	local seedsLeft = State.totalSeeds()
+	local selected = State.selected and Seeds.get(State.selected)
+
+	if growing + blooming == 0 then
+		if seedsLeft == 0 then
+			return "You're out of seeds! Open the Seed Shop on the left to buy more."
+		end
+		local name = if selected then selected.name else "seed"
+		return `Walk up to a soil plot in your garden and press [E] to plant your {name}.`
+	end
+	if blooming > 0 and growing > 0 and soonest then
+		return `Birds are visiting! Next bloom: {soonestName} in {Format.duration(soonest)}.`
+	end
+	if blooming > 0 then
+		local found, total = State.speciesDiscovered(), #Birds.list
+		if seedsLeft > 0 then
+			return `Birds are visiting! Plant your spare seeds too. ({found}/{total} species found)`
+		end
+		return `Birds are visiting! ({found}/{total} species found) Buy better seeds to attract rarer birds.`
+	end
+	if soonest then
+		return `Your {soonestName} is growing - ready in {Format.duration(soonest)}. Better seeds take longer, but attract rarer birds!`
+	end
+	return ""
+end
+
+function Objective.init(gui: ScreenGui)
+	label = Ui.label({
+		Name = "Objective",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 58),
+		AutomaticSize = Enum.AutomaticSize.XY,
+		BackgroundTransparency = 0.25,
+		BackgroundColor3 = Ui.COLORS.bg,
+		Font = Ui.FONT_BOLD,
+		TextSize = 15,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = gui,
+	})
+	Ui.corner(12).Parent = label
+	Ui.padding(8).Parent = label
+	Ui.new("UISizeConstraint", { MaxSize = Vector2.new(560, 90), Parent = label })
+
+	task.spawn(function()
+		while true do
+			local text = compute()
+			label.Text = text
+			label.Visible = text ~= ""
+			task.wait(0.5)
+		end
+	end)
+end
+
+return Objective
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="34">
+          <Properties>
+            <string name="Name">PlantLabels</string>
+            <string name="Source"><![CDATA[--!strict
+-- Floating name + countdown above every plant (yours and other players').
+-- Purely visual and computed locally from the plant's attributes, so it costs
+-- no network traffic while you wait.
+
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Clock = require(Shared:WaitForChild("Clock"))
+local Config = require(Shared:WaitForChild("Config"))
+local Format = require(Shared:WaitForChild("Format"))
+local Growth = require(Shared:WaitForChild("Growth"))
+local Seeds = require(Shared:WaitForChild("Seeds"))
+local Types = require(Shared:WaitForChild("Types"))
+
+local Ui = require(script.Parent.Ui)
+
+local PlantLabels = {}
+
+type Label = {
+	gui: BillboardGui,
+	status: TextLabel,
+	bar: Frame,
+	fill: Frame,
+	seed: Types.SeedDef,
+	model: Model,
+}
+
+local labels: { [Instance]: Label } = {}
+
+local function add(instance: Instance)
+	if not instance:IsA("Model") or labels[instance] then
+		return
+	end
+	local model: Model = instance
+	local seed = Seeds.get(tostring(model:GetAttribute("SeedId")))
+	if not seed then
+		return
+	end
+	task.spawn(function()
+		local root = model:WaitForChild("Root", 10)
+		if not root or not root:IsA("BasePart") or not model.Parent or labels[model] then
+			return
+		end
+		local color = Config.RARITY_COLORS[seed.rarity]
+
+		local gui = Ui.new("BillboardGui", {
+			Name = "PlantLabel",
+			Size = UDim2.fromOffset(190, 56),
+			MaxDistance = 90,
+			LightInfluence = 0,
+			Adornee = root,
+			StudsOffsetWorldSpace = Vector3.new(0, seed.labelHeight * Config.SCALE_MIN + 1.8, 0),
+			Parent = root,
+		})
+		local frame = Ui.new("Frame", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundColor3 = Ui.COLORS.bg,
+			BackgroundTransparency = 0.15,
+			Parent = gui,
+		}, { Ui.corner(10), Ui.stroke(color, 2, 0.2) })
+		Ui.label({
+			Position = UDim2.fromOffset(8, 2),
+			Size = UDim2.new(1, -16, 0, 24),
+			Text = seed.name,
+			Font = Ui.FONT,
+			TextSize = 19,
+			TextColor3 = color,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Parent = frame,
+		})
+		local status = Ui.label({
+			Position = UDim2.fromOffset(8, 24),
+			Size = UDim2.new(1, -16, 0, 16),
+			Text = "",
+			Font = Ui.FONT_BOLD,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Parent = frame,
+		})
+		local bar = Ui.new("Frame", {
+			Position = UDim2.new(0, 10, 1, -13),
+			Size = UDim2.new(1, -20, 0, 7),
+			BackgroundColor3 = Color3.fromRGB(20, 32, 27),
+			BorderSizePixel = 0,
+			Parent = frame,
+		}, { Ui.corner(4) })
+		local fill = Ui.new(
+			"Frame",
+			{ Size = UDim2.fromScale(0, 1), BackgroundColor3 = color, BorderSizePixel = 0, Parent = bar },
+			{ Ui.corner(4) }
+		)
+
+		labels[model] = { gui = gui, status = status, bar = bar, fill = fill, seed = seed, model = model }
+	end)
+end
+
+local function remove(instance: Instance)
+	local label = labels[instance]
+	if label then
+		labels[instance] = nil
+		label.gui:Destroy()
+	end
+end
+
+function PlantLabels.init()
+	CollectionService:GetInstanceAddedSignal("Plant"):Connect(add)
+	CollectionService:GetInstanceRemovedSignal("Plant"):Connect(remove)
+	for _, plant in CollectionService:GetTagged("Plant") do
+		add(plant)
+	end
+
+	task.spawn(function()
+		while true do
+			local now = Clock.now()
+			for model, label in labels do
+				if not model.Parent then
+					remove(model)
+				else
+					local plantedAt = model:GetAttribute("PlantedAt")
+					if type(plantedAt) == "number" then
+						local progress = Growth.progress(plantedAt, label.seed.growTime, now)
+						if progress >= 1 then
+							label.status.Text = "Blooming - birds visit!"
+							label.status.TextColor3 = Ui.COLORS.good
+							label.bar.Visible = false
+						else
+							label.status.Text = "Growing  " .. Format.duration(label.seed.growTime - (now - plantedAt))
+							label.status.TextColor3 = Ui.COLORS.text
+							label.bar.Visible = true
+							label.fill.Size = UDim2.fromScale(progress, 1)
+						end
+						label.gui.StudsOffsetWorldSpace =
+							Vector3.new(0, label.seed.labelHeight * Growth.scale(progress) + 1.8, 0)
+					end
+				end
+			end
+			task.wait(0.2)
+		end
+	end)
+end
+
+return PlantLabels
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="35">
+          <Properties>
+            <string name="Name">Prompts</string>
+            <string name="Source"><![CDATA[--!strict
+-- Proximity prompts for the local player's own garden. They are created on the
+-- client, so other players never see (or can trigger) your prompts, and the
+-- text can follow your selected seed instantly.
+--   [E]        plant the selected seed / unlock the next plot
+--   [X] (hold) dig up a plant
+
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared:WaitForChild("Config"))
+local Format = require(Shared:WaitForChild("Format"))
+local Remotes = require(Shared:WaitForChild("Remotes")).get()
+local Seeds = require(Shared:WaitForChild("Seeds"))
+
+local State = require(script.Parent.State)
+local Toasts = require(script.Parent.Toasts)
+local Ui = require(script.Parent.Ui)
+
+local Prompts = {}
+
+local localPlayer = Players.LocalPlayer
+local plotPrompts: { [BasePart]: ProximityPrompt } = {}
+local digPrompts: { [Instance]: ProximityPrompt } = {}
+
+local function myGarden(): Instance?
+	local gardens = workspace:FindFirstChild("Gardens")
+	if not gardens then
+		return nil
+	end
+	for _, garden in gardens:GetChildren() do
+		if garden:GetAttribute("OwnerUserId") == localPlayer.UserId then
+			return garden
+		end
+	end
+	return nil
+end
+
+local function newPrompt(
+	parent: BasePart,
+	name: string,
+	key: Enum.KeyCode,
+	hold: number,
+	distance: number
+): ProximityPrompt
+	local prompt = Ui.new("ProximityPrompt", {
+		Name = name,
+		KeyboardKeyCode = key,
+		HoldDuration = hold,
+		MaxActivationDistance = distance,
+		RequiresLineOfSight = false,
+		Parent = parent,
+	})
+	return prompt
+end
+
+local function unlockPlot()
+	task.spawn(function()
+		local ok, result = pcall(function()
+			return Remotes.UnlockPlot:InvokeServer()
+		end)
+		if ok then
+			Toasts.result(result)
+		end
+	end)
+end
+
+local function createPlotPrompt(soil: BasePart, index: number): ProximityPrompt
+	local prompt = newPrompt(soil, "PlotPrompt", Enum.KeyCode.E, 0, 13)
+	prompt.Triggered:Connect(function()
+		if index > State.plots then
+			if index == State.plots + 1 and State.nextPlotPrice then
+				unlockPlot()
+			end
+		elseif soil:GetAttribute("HasPlant") == false and State.selected then
+			Remotes.PlantSeed:FireServer(index, State.selected)
+		end
+	end)
+	return prompt
+end
+
+local function updatePlotPrompt(prompt: ProximityPrompt, soil: BasePart, index: number)
+	if index > State.plots then
+		local isNext = index == State.plots + 1 and State.nextPlotPrice ~= nil
+		prompt.Enabled = isNext
+		prompt.ObjectText = "Locked plot"
+		prompt.HoldDuration = 0.5
+		prompt.ActionText = if State.nextPlotPrice
+			then `Unlock for {Format.feathers(State.nextPlotPrice)} feathers`
+			else "Locked"
+		return
+	end
+	prompt.HoldDuration = 0
+	prompt.ObjectText = "Garden plot"
+	local seed = if State.selected then Seeds.get(State.selected) else nil
+	prompt.Enabled = soil:GetAttribute("HasPlant") == false and seed ~= nil
+	prompt.ActionText = if seed then `Plant {seed.name}` else "Pick a seed"
+end
+
+local function createDigPrompt(plant: Model, root: BasePart): ProximityPrompt
+	local prompt = newPrompt(root, "DigPrompt", Enum.KeyCode.X, 1.5, 11)
+	prompt.GamepadKeyCode = Enum.KeyCode.ButtonY
+	prompt.Triggered:Connect(function()
+		local index = plant:GetAttribute("PlotIndex")
+		if type(index) == "number" then
+			Remotes.DigPlant:FireServer(index)
+		end
+	end)
+	return prompt
+end
+
+local function reconcile()
+	local garden = myGarden()
+
+	if garden then
+		for index = 1, Config.MAX_PLOTS do
+			local soil = garden:FindFirstChild("Plot_" .. index)
+			if soil and soil:IsA("BasePart") then
+				local prompt = plotPrompts[soil]
+				if not prompt then
+					prompt = createPlotPrompt(soil, index)
+					plotPrompts[soil] = prompt
+				end
+				updatePlotPrompt(prompt, soil, index)
+			end
+		end
+	end
+	-- forget prompts for soil that is no longer ours (e.g. we respawned into a new server)
+	for soil, prompt in plotPrompts do
+		if not garden or not soil:IsDescendantOf(garden) then
+			prompt:Destroy()
+			plotPrompts[soil] = nil
+		end
+	end
+
+	for _, plant in CollectionService:GetTagged("Plant") do
+		if plant:IsA("Model") and plant:GetAttribute("OwnerUserId") == localPlayer.UserId then
+			local root = plant:FindFirstChild("Root")
+			if root and root:IsA("BasePart") then
+				local prompt = digPrompts[plant]
+				if not prompt then
+					prompt = createDigPrompt(plant, root)
+					digPrompts[plant] = prompt
+				end
+				local seed = Seeds.get(tostring(plant:GetAttribute("SeedId")))
+				prompt.ObjectText = if seed then seed.name else "Plant"
+				prompt.ActionText = if plant:GetAttribute("Mature") == true
+					then "Dig up (seed is lost!)"
+					else "Dig up (seed returned)"
+			end
+		end
+	end
+	for plant, prompt in digPrompts do
+		if not plant.Parent then
+			prompt:Destroy()
+			digPrompts[plant] = nil
+		end
+	end
+end
+
+function Prompts.init()
+	State.changed:Connect(reconcile)
+	State.selectedChanged:Connect(reconcile)
+	CollectionService:GetInstanceAddedSignal("Plant"):Connect(function()
+		task.defer(reconcile)
+	end)
+	task.spawn(function()
+		while true do
+			reconcile()
+			task.wait(0.5)
+		end
+	end)
+end
+
+return Prompts
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="36">
+          <Properties>
+            <string name="Name">ShopUI</string>
+            <string name="Source"><![CDATA[--!strict
+-- The seed shop window: live stock, restock countdown, buy buttons.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Birds = require(Shared:WaitForChild("Birds"))
+local Clock = require(Shared:WaitForChild("Clock"))
+local Config = require(Shared:WaitForChild("Config"))
+local Format = require(Shared:WaitForChild("Format"))
+local Growth = require(Shared:WaitForChild("Growth"))
+local PlantModels = require(Shared:WaitForChild("PlantModels"))
+local Remotes = require(Shared:WaitForChild("Remotes")).get()
+local Seeds = require(Shared:WaitForChild("Seeds"))
+local Types = require(Shared:WaitForChild("Types"))
+
+local State = require(script.Parent.State)
+local Toasts = require(script.Parent.Toasts)
+local Ui = require(script.Parent.Ui)
+local Viewport = require(script.Parent.Viewport)
+
+local ShopUI = {}
+
+type Row = {
+	seed: Types.SeedDef,
+	frame: Frame,
+	price: TextLabel,
+	stock: TextLabel,
+	buyOne: TextButton,
+	buyMax: TextButton,
+}
+
+local overlay: TextButton
+local timerLabel: TextLabel
+local rows: { Row } = {}
+local busy = false
+
+local function birdsFor(seed: Types.SeedDef): string
+	local names = {}
+	for _, entry in seed.birds do
+		local bird = Birds.get(entry.id)
+		if bird and bird.rarity == seed.rarity then
+			table.insert(names, bird.name)
+		end
+	end
+	return table.concat(names, ", ")
+end
+
+local function buy(seedId: string, amount: number)
+	if busy then
+		return
+	end
+	busy = true
+	task.spawn(function()
+		local ok, result = pcall(function()
+			return Remotes.BuySeed:InvokeServer(seedId, amount)
+		end)
+		busy = false
+		if ok then
+			Toasts.result(result)
+		end
+	end)
+end
+
+local function refresh()
+	for _, row in rows do
+		local seed = row.seed
+		local inStock = State.stock[seed.id] or 0
+		local afford = math.floor(State.feathers / seed.price)
+		local maxN = math.min(inStock, afford, Config.MAX_BUY_AMOUNT)
+
+		row.price.Text = Format.feathers(seed.price)
+		if inStock > 0 then
+			row.stock.Text = `In stock: {inStock}`
+			row.stock.TextColor3 = Ui.COLORS.good
+		else
+			row.stock.Text = "Sold out"
+			row.stock.TextColor3 = Ui.COLORS.bad
+		end
+		Ui.setEnabled(row.buyOne, inStock > 0 and afford >= 1, Ui.COLORS.good)
+		row.buyOne.Text = "Buy"
+		Ui.setEnabled(row.buyMax, maxN >= 2, Color3.fromRGB(82, 160, 216))
+		row.buyMax.Text = if maxN >= 2 then `Buy x{maxN}` else "Buy max"
+		row.frame.LayoutOrder = seed.tier
+	end
+end
+
+local function buildRow(seed: Types.SeedDef, parent: Instance): Row
+	local color = Config.RARITY_COLORS[seed.rarity]
+	local frame = Ui.new("Frame", {
+		Name = seed.id,
+		Size = UDim2.new(1, -8, 0, 124),
+		BackgroundColor3 = Ui.COLORS.row,
+		Parent = parent,
+	}, { Ui.corner(14), Ui.stroke(color, 2, 0.35) })
+
+	local preview = Ui.new("ViewportFrame", {
+		Position = UDim2.fromOffset(10, 12),
+		Size = UDim2.fromOffset(100, 100),
+		BackgroundColor3 = Ui.COLORS.bg,
+		BackgroundTransparency = 0,
+		Parent = frame,
+	}, { Ui.corner(12) })
+	local model = PlantModels.build(seed.id, CFrame.new(), true)
+	if model then
+		Viewport.mount(preview, model, Vector3.new(0.4, 0.3, -1))
+		preview.BackgroundTransparency = 0
+	end
+
+	local info = Ui.new("Frame", {
+		Position = UDim2.fromOffset(122, 8),
+		Size = UDim2.new(1, -122 - 138, 1, -16),
+		BackgroundTransparency = 1,
+		Parent = frame,
+	})
+	Ui.label({
+		Size = UDim2.new(1, 0, 0, 28),
+		Text = seed.name .. " Seed",
+		Font = Ui.FONT,
+		TextSize = 22,
+		TextColor3 = color,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = info,
+	})
+	Ui.label({
+		Position = UDim2.fromOffset(0, 28),
+		Size = UDim2.new(1, 0, 0, 16),
+		Text = seed.rarity,
+		Font = Ui.FONT_BOLD,
+		TextSize = 12,
+		TextColor3 = color,
+		Parent = info,
+	})
+	Ui.label({
+		Position = UDim2.fromOffset(0, 46),
+		Size = UDim2.new(1, 0, 0, 30),
+		Text = seed.blurb,
+		TextSize = 13,
+		TextColor3 = Ui.COLORS.muted,
+		TextWrapped = true,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Parent = info,
+	})
+
+	local perVisit = Growth.expectedVisitValue(seed, function(id: string): number
+		local bird = Birds.get(id)
+		return if bird then bird.value else 0
+	end)
+	local perches = if #seed.perches == 1 then "1 perch" else `{#seed.perches} perches`
+	Ui.label({
+		Position = UDim2.fromOffset(0, 78),
+		Size = UDim2.new(1, 0, 0, 16),
+		Text = `Grows in {Format.growTime(seed.growTime)}  |  {perches}  |  ~{Format.feathers(perVisit)} per visit`,
+		Font = Ui.FONT_BOLD,
+		TextSize = 12,
+		TextColor3 = Ui.COLORS.text,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = info,
+	})
+	Ui.label({
+		Position = UDim2.fromOffset(0, 94),
+		Size = UDim2.new(1, 0, 0, 16),
+		Text = "Attracts: " .. birdsFor(seed),
+		TextSize = 12,
+		TextColor3 = Ui.COLORS.muted,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = info,
+	})
+
+	local right = Ui.new("Frame", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -10, 0, 8),
+		Size = UDim2.fromOffset(120, 108),
+		BackgroundTransparency = 1,
+		Parent = frame,
+	})
+	local price = Ui.label({
+		Size = UDim2.new(1, 0, 0, 26),
+		Font = Ui.FONT,
+		TextSize = 22,
+		TextColor3 = Ui.COLORS.gold,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = right,
+	})
+	local stock = Ui.label({
+		Position = UDim2.fromOffset(0, 26),
+		Size = UDim2.new(1, 0, 0, 16),
+		Font = Ui.FONT_BOLD,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = right,
+	})
+	local buyOne =
+		Ui.button({ Position = UDim2.fromOffset(0, 46), Size = UDim2.new(1, 0, 0, 28), TextSize = 16, Parent = right })
+	local buyMax =
+		Ui.button({ Position = UDim2.fromOffset(0, 78), Size = UDim2.new(1, 0, 0, 28), TextSize = 15, Parent = right })
+
+	buyOne.Activated:Connect(function()
+		buy(seed.id, 1)
+	end)
+	buyMax.Activated:Connect(function()
+		local inStock = State.stock[seed.id] or 0
+		local afford = math.floor(State.feathers / seed.price)
+		local n = math.min(inStock, afford, Config.MAX_BUY_AMOUNT)
+		if n >= 2 then
+			buy(seed.id, n)
+		end
+	end)
+
+	return { seed = seed, frame = frame, price = price, stock = stock, buyOne = buyOne, buyMax = buyMax }
+end
+
+function ShopUI.isOpen(): boolean
+	return overlay.Visible
+end
+
+function ShopUI.close()
+	overlay.Visible = false
+end
+
+function ShopUI.open()
+	if overlay.Visible then
+		return
+	end
+	overlay.Visible = true
+	refresh()
+	task.spawn(function()
+		while overlay.Visible do
+			timerLabel.Text = "New stock in " .. Format.duration(State.nextRestock - Clock.now())
+			task.wait(0.25)
+		end
+	end)
+end
+
+function ShopUI.toggle()
+	if overlay.Visible then
+		ShopUI.close()
+	else
+		ShopUI.open()
+	end
+end
+
+function ShopUI.init(gui: ScreenGui)
+	overlay = Ui.new("TextButton", {
+		Name = "ShopOverlay",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.5,
+		AutoButtonColor = false,
+		Text = "",
+		Visible = false,
+		ZIndex = 10,
+		Parent = gui,
+	})
+	overlay.Activated:Connect(ShopUI.close)
+
+	local panel = Ui.new("Frame", {
+		Name = "Panel",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(0.82, 0.82),
+		BackgroundColor3 = Ui.COLORS.panel,
+		Active = true, -- swallow clicks so the overlay behind doesn't close
+		Parent = overlay,
+	}, {
+		Ui.corner(20),
+		Ui.stroke(Color3.fromRGB(214, 112, 60), 4),
+		Ui.new("UISizeConstraint", { MaxSize = Vector2.new(760, 580), MinSize = Vector2.new(300, 280) }),
+	})
+
+	Ui.label({
+		Position = UDim2.fromOffset(20, 10),
+		Size = UDim2.new(0.5, 0, 0, 40),
+		Text = "Seed Shop",
+		Font = Ui.FONT,
+		TextSize = 34,
+		TextColor3 = Ui.COLORS.gold,
+		Parent = panel,
+	})
+	timerLabel = Ui.label({
+		Position = UDim2.fromOffset(22, 48),
+		Size = UDim2.new(0.6, 0, 0, 20),
+		Text = "",
+		Font = Ui.FONT_BOLD,
+		TextSize = 14,
+		TextColor3 = Ui.COLORS.muted,
+		Parent = panel,
+	})
+
+	local close = Ui.button({
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -14, 0, 14),
+		Size = UDim2.fromOffset(40, 40),
+		Text = "X",
+		BackgroundColor3 = Ui.COLORS.bad,
+		Parent = panel,
+	})
+	close.Activated:Connect(ShopUI.close)
+
+	local list = Ui.new("ScrollingFrame", {
+		Position = UDim2.fromOffset(12, 76),
+		Size = UDim2.new(1, -24, 1, -88),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 6,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Parent = panel,
+	}, { Ui.new("UIListLayout", { Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder }) })
+
+	for _, seed in Seeds.list do
+		table.insert(rows, buildRow(seed, list))
+	end
+
+	State.changed:Connect(refresh)
+	State.stockChanged:Connect(refresh)
+	refresh()
+end
+
+return ShopUI
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="37">
+          <Properties>
+            <string name="Name">State</string>
+            <string name="Source"><![CDATA[--!strict
+-- The client's copy of the player's data, plus which seed is selected.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Seeds = require(Shared:WaitForChild("Seeds"))
+local Signal = require(Shared:WaitForChild("Signal"))
+local Types = require(Shared:WaitForChild("Types"))
+
+local State = {
+	feathers = 0,
+	seeds = {} :: { [string]: number },
+	birds = {} :: { [string]: number },
+	plots = 0,
+	nextPlotPrice = nil :: number?,
+	totalVisits = 0,
+	stock = {} :: { [string]: number },
+	nextRestock = 0,
+	selected = nil :: string?,
+	changed = Signal.new(), -- any data change
+	stockChanged = Signal.new(),
+	selectedChanged = Signal.new(),
+}
+
+local function ensureSelection()
+	local current = State.selected
+	if current and (State.seeds[current] or 0) > 0 then
+		return
+	end
+	local pick: string? = nil
+	for _, seed in Seeds.list do
+		if (State.seeds[seed.id] or 0) > 0 then
+			pick = seed.id
+			break
+		end
+	end
+	if pick ~= current then
+		State.selected = pick
+		State.selectedChanged:Fire(pick)
+	end
+end
+
+function State.apply(snapshot: Types.Snapshot)
+	State.feathers = snapshot.feathers
+	State.seeds = snapshot.seeds
+	State.birds = snapshot.birds
+	State.plots = snapshot.plots
+	State.nextPlotPrice = snapshot.nextPlotPrice
+	State.totalVisits = snapshot.totalVisits
+	ensureSelection()
+	State.changed:Fire()
+end
+
+function State.setStock(info: Types.StockInfo)
+	State.stock = info.stock
+	State.nextRestock = info.nextRestock
+	State.stockChanged:Fire()
+end
+
+function State.select(id: string?)
+	if id ~= nil and (State.seeds[id] or 0) < 1 then
+		return
+	end
+	if State.selected ~= id then
+		State.selected = id
+		State.selectedChanged:Fire(id)
+	end
+end
+
+function State.seedCount(id: string): number
+	return State.seeds[id] or 0
+end
+
+function State.totalSeeds(): number
+	local total = 0
+	for _, count in State.seeds do
+		total += count
+	end
+	return total
+end
+
+function State.speciesDiscovered(): number
+	local n = 0
+	for _ in State.birds do
+		n += 1
+	end
+	return n
+end
+
+return State
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="38">
+          <Properties>
+            <string name="Name">Toasts</string>
+            <string name="Source"><![CDATA[--!strict
+-- Transient feedback: toast messages, the "new bird discovered" banner, and the
+-- floating "+feathers" popup that appears over a bird when it lands.
+
+local Debris = game:GetService("Debris")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local BirdModel = require(Shared:WaitForChild("BirdModel"))
+local Birds = require(Shared:WaitForChild("Birds"))
+local Config = require(Shared:WaitForChild("Config"))
+local Format = require(Shared:WaitForChild("Format"))
+local Types = require(Shared:WaitForChild("Types"))
+
+local Ui = require(script.Parent.Ui)
+local Viewport = require(script.Parent.Viewport)
+
+local Toasts = {}
+
+local container: Frame
+local banner: Frame
+local bannerStroke: UIStroke
+local fxFolder: Folder
+
+local MAX_TOASTS = 4
+
+function Toasts.init(gui: ScreenGui)
+	container = Ui.new("Frame", {
+		Name = "Toasts",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 108),
+		Size = UDim2.new(0.9, 0, 0, 220),
+		BackgroundTransparency = 1,
+		Parent = gui,
+	}, {
+		Ui.new("UIListLayout", {
+			Padding = UDim.new(0, 6),
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+	})
+
+	banner = Ui.new("Frame", {
+		Name = "DiscoveryBanner",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, -220),
+		Size = UDim2.fromOffset(400, 130),
+		BackgroundColor3 = Ui.COLORS.bg,
+		Visible = false,
+		ZIndex = 20,
+		Parent = gui,
+	}, { Ui.corner(18) })
+	bannerStroke = Ui.stroke(Ui.COLORS.gold, 3)
+	bannerStroke.Parent = banner
+
+	fxFolder = Ui.new("Folder", { Name = "ClientFX", Parent = workspace })
+end
+
+local order = 0
+
+function Toasts.show(text: string, color: Color3?)
+	order += 1
+	local toast = Ui.new("TextLabel", {
+		Name = "Toast",
+		LayoutOrder = order,
+		AutomaticSize = Enum.AutomaticSize.XY,
+		BackgroundColor3 = Ui.COLORS.bg,
+		BackgroundTransparency = 0.1,
+		Font = Ui.FONT_BOLD,
+		Text = text,
+		TextColor3 = color or Ui.COLORS.text,
+		TextSize = 16,
+		TextWrapped = true,
+		Parent = container,
+	}, {
+		Ui.corner(12),
+		Ui.padding(10),
+		Ui.stroke(color or Ui.COLORS.panelLight, 2, 0.3),
+		Ui.new("UISizeConstraint", { MaxSize = Vector2.new(460, 120) }),
+	})
+
+	-- keep the stack short
+	local toasts = {}
+	for _, child in container:GetChildren() do
+		if child.Name == "Toast" then
+			table.insert(toasts, child)
+		end
+	end
+	if #toasts > MAX_TOASTS then
+		toasts[1]:Destroy()
+	end
+
+	task.delay(3.6, function()
+		if not toast.Parent then
+			return
+		end
+		local info = TweenInfo.new(0.4)
+		TweenService:Create(toast, info, { TextTransparency = 1, BackgroundTransparency = 1 }):Play()
+		local stroke = toast:FindFirstChildOfClass("UIStroke")
+		if stroke then
+			TweenService:Create(stroke, info, { Transparency = 1 }):Play()
+		end
+		task.wait(0.45)
+		toast:Destroy()
+	end)
+end
+
+function Toasts.result(result: any)
+	if type(result) ~= "table" then
+		return
+	end
+	Toasts.show(tostring(result.message), if result.ok then Ui.COLORS.good else Ui.COLORS.bad)
+end
+
+------------------------------------------------------------------------------
+-- Discovery banner
+------------------------------------------------------------------------------
+
+local queue: { { birdId: string, bonus: number } } = {}
+local pumping = false
+
+local function playBanner(birdId: string, bonus: number)
+	local def = Birds.get(birdId)
+	if not def then
+		return
+	end
+	local rarityColor = Config.RARITY_COLORS[def.rarity]
+
+	for _, child in banner:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	bannerStroke.Color = rarityColor
+
+	local preview = Ui.new("ViewportFrame", {
+		Position = UDim2.fromOffset(12, 10),
+		Size = UDim2.fromOffset(110, 110),
+		Parent = banner,
+	})
+	Viewport.mount(preview, BirdModel.build(def).model)
+
+	Ui.label({
+		Position = UDim2.fromOffset(134, 12),
+		Size = UDim2.new(1, -146, 0, 18),
+		Text = "NEW BIRD DISCOVERED!",
+		Font = Ui.FONT_BOLD,
+		TextSize = 14,
+		TextColor3 = Ui.COLORS.gold,
+		Parent = banner,
+	})
+	Ui.label({
+		Position = UDim2.fromOffset(134, 34),
+		Size = UDim2.new(1, -146, 0, 34),
+		Text = def.name,
+		Font = Ui.FONT,
+		TextSize = 28,
+		TextColor3 = rarityColor,
+		TextScaled = true,
+		Parent = banner,
+	})
+	Ui.label({
+		Position = UDim2.fromOffset(134, 72),
+		Size = UDim2.new(1, -146, 0, 18),
+		Text = def.rarity,
+		Font = Ui.FONT_BOLD,
+		TextSize = 15,
+		TextColor3 = rarityColor,
+		Parent = banner,
+	})
+	Ui.label({
+		Position = UDim2.fromOffset(134, 94),
+		Size = UDim2.new(1, -146, 0, 22),
+		Text = `Discovery bonus: +{Format.feathers(bonus)} feathers`,
+		Font = Ui.FONT_BOLD,
+		TextSize = 15,
+		TextColor3 = Ui.COLORS.good,
+		Parent = banner,
+	})
+
+	banner.Visible = true
+	banner.Position = UDim2.new(0.5, 0, 0, -220)
+	TweenService:Create(
+		banner,
+		TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Position = UDim2.new(0.5, 0, 0, 130) }
+	):Play()
+	task.wait(4.2)
+	local out = TweenService:Create(
+		banner,
+		TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+		{ Position = UDim2.new(0.5, 0, 0, -220) }
+	)
+	out:Play()
+	out.Completed:Wait()
+	banner.Visible = false
+end
+
+function Toasts.discovery(birdId: string, bonus: number)
+	table.insert(queue, { birdId = birdId, bonus = bonus })
+	if pumping then
+		return
+	end
+	pumping = true
+	task.spawn(function()
+		while #queue > 0 do
+			local item = table.remove(queue, 1)
+			if item then
+				playBanner(item.birdId, item.bonus)
+			end
+		end
+		pumping = false
+	end)
+end
+
+------------------------------------------------------------------------------
+-- "+feathers" popup over the bird
+------------------------------------------------------------------------------
+
+function Toasts.reward(position: Vector3, amount: number, birdId: string)
+	local def = Birds.get(birdId)
+	local anchor = Ui.new("Part", {
+		Name = "RewardAnchor",
+		Anchored = true,
+		CanCollide = false,
+		CanQuery = false,
+		CanTouch = false,
+		Transparency = 1,
+		Size = Vector3.new(0.2, 0.2, 0.2),
+		Position = position,
+		Parent = fxFolder,
+	})
+	local gui = Ui.new("BillboardGui", {
+		Size = UDim2.fromOffset(200, 64),
+		AlwaysOnTop = true,
+		MaxDistance = 140,
+		LightInfluence = 0,
+		StudsOffsetWorldSpace = Vector3.zero,
+		Parent = anchor,
+	})
+	local amountLabel = Ui.label({
+		Size = UDim2.new(1, 0, 0.62, 0),
+		Text = "+" .. Format.feathers(amount),
+		Font = Ui.FONT,
+		TextScaled = true,
+		TextColor3 = Ui.COLORS.gold,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextStrokeTransparency = 0.2,
+		Parent = gui,
+	})
+	local nameLabel = Ui.label({
+		Position = UDim2.fromScale(0, 0.62),
+		Size = UDim2.new(1, 0, 0.34, 0),
+		Text = if def then def.name else "",
+		Font = Ui.FONT_BOLD,
+		TextScaled = true,
+		TextColor3 = if def then Config.RARITY_COLORS[def.rarity] else Ui.COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextStrokeTransparency = 0.3,
+		Parent = gui,
+	})
+
+	TweenService:Create(
+		gui,
+		TweenInfo.new(2.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ StudsOffsetWorldSpace = Vector3.new(0, 4.5, 0) }
+	):Play()
+	local fade = TweenInfo.new(0.9, Enum.EasingStyle.Linear, Enum.EasingDirection.In, 0, false, 1.3)
+	TweenService:Create(amountLabel, fade, { TextTransparency = 1, TextStrokeTransparency = 1 }):Play()
+	TweenService:Create(nameLabel, fade, { TextTransparency = 1, TextStrokeTransparency = 1 }):Play()
+	Debris:AddItem(anchor, 2.6)
+end
+
+-- Routes a server Notice to the right effect.
+function Toasts.handle(notice: Types.Notice)
+	if notice.kind == "toast" and notice.text then
+		Toasts.show(notice.text, notice.color)
+	elseif notice.kind == "reward" and notice.position and notice.amount and notice.birdId then
+		Toasts.reward(notice.position, notice.amount, notice.birdId)
+	elseif notice.kind == "discovery" and notice.birdId and notice.bonus then
+		Toasts.discovery(notice.birdId, notice.bonus)
+	end
+end
+
+return Toasts
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="39">
+          <Properties>
+            <string name="Name">Ui</string>
+            <string name="Source"><![CDATA[--!strict
+-- Small helpers so the interface can be built in code without a wall of boilerplate.
+
+local Ui = {}
+
+Ui.COLORS = {
+	bg = Color3.fromRGB(28, 48, 40),
+	panel = Color3.fromRGB(42, 70, 58),
+	panelLight = Color3.fromRGB(58, 94, 78),
+	row = Color3.fromRGB(36, 60, 50),
+	text = Color3.fromRGB(246, 250, 242),
+	muted = Color3.fromRGB(176, 202, 186),
+	gold = Color3.fromRGB(255, 208, 82),
+	good = Color3.fromRGB(104, 208, 116),
+	bad = Color3.fromRGB(236, 96, 96),
+	disabled = Color3.fromRGB(86, 100, 92),
+}
+
+Ui.FONT = Enum.Font.FredokaOne
+Ui.FONT_BODY = Enum.Font.GothamMedium
+Ui.FONT_BOLD = Enum.Font.GothamBold
+
+-- Instance.new + properties + children in one call. `Parent` is applied last.
+function Ui.new(className: string, props: { [string]: any }?, children: any?): any
+	local inst = Instance.new(className)
+	local parent: Instance? = nil
+	if props then
+		for key, value in props do
+			if key == "Parent" then
+				parent = value
+			else
+				(inst :: any)[key] = value
+			end
+		end
+	end
+	if children then
+		for _, child in children :: { Instance } do
+			child.Parent = inst
+		end
+	end
+	if parent then
+		inst.Parent = parent
+	end
+	return inst
+end
+
+-- (these return `any` so they can be mixed freely in a children list)
+function Ui.corner(radius: number): any
+	return Ui.new("UICorner", { CornerRadius = UDim.new(0, radius) })
+end
+
+function Ui.stroke(color: Color3, thickness: number, transparency: number?): any
+	return Ui.new("UIStroke", {
+		Color = color,
+		Thickness = thickness,
+		Transparency = transparency or 0,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	})
+end
+
+function Ui.padding(px: number): any
+	return Ui.new("UIPadding", {
+		PaddingTop = UDim.new(0, px),
+		PaddingBottom = UDim.new(0, px),
+		PaddingLeft = UDim.new(0, px),
+		PaddingRight = UDim.new(0, px),
+	})
+end
+
+function Ui.label(props: { [string]: any }): TextLabel
+	local merged: { [string]: any } = {
+		BackgroundTransparency = 1,
+		Font = Ui.FONT_BODY,
+		TextColor3 = Ui.COLORS.text,
+		TextSize = 16,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Center,
+		Text = "",
+	}
+	for k, v in props do
+		merged[k] = v
+	end
+	return Ui.new("TextLabel", merged)
+end
+
+function Ui.button(props: { [string]: any }): TextButton
+	local merged: { [string]: any } = {
+		AutoButtonColor = true,
+		BackgroundColor3 = Ui.COLORS.panelLight,
+		Font = Ui.FONT,
+		TextColor3 = Ui.COLORS.text,
+		TextSize = 18,
+		Text = "",
+	}
+	for k, v in props do
+		merged[k] = v
+	end
+	local button = Ui.new("TextButton", merged)
+	Ui.corner(10).Parent = button
+	return button
+end
+
+-- Dims and disables a button (and restores it) based on `enabled`.
+function Ui.setEnabled(button: TextButton, enabled: boolean, enabledColor: Color3)
+	button.Active = enabled
+	button.AutoButtonColor = enabled
+	button.BackgroundColor3 = if enabled then enabledColor else Ui.COLORS.disabled
+	button.TextTransparency = if enabled then 0 else 0.4
+end
+
+return Ui
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="40">
+          <Properties>
+            <string name="Name">Viewport</string>
+            <string name="Source"><![CDATA[--!strict
+-- Shows a 3D model inside a ViewportFrame (used for seed and bird previews).
+
+local Viewport = {}
+
+function Viewport.mount(frame: ViewportFrame, model: Model, lookFrom: Vector3?)
+	frame.BackgroundTransparency = 1
+	frame.Ambient = Color3.fromRGB(190, 190, 195)
+	frame.LightColor = Color3.fromRGB(255, 252, 240)
+	frame.LightDirection = Vector3.new(-0.6, -1, -0.5)
+
+	for _, child in frame:GetChildren() do
+		if child:IsA("Model") or child:IsA("Camera") then
+			child:Destroy()
+		end
+	end
+	model.Parent = frame
+
+	local center, size = model:GetBoundingBox()
+	local camera = Instance.new("Camera")
+	camera.FieldOfView = 30
+	-- distance at which the model's bounding sphere just fits the frame
+	local radius = size.Magnitude / 2
+	local distance = radius / math.sin(math.rad(camera.FieldOfView / 2)) * 0.92
+	-- birds face -Z, so look from the -Z side to see their faces
+	local direction = (lookFrom or Vector3.new(0.55, 0.25, -1)).Unit
+	camera.CFrame = CFrame.lookAt(center.Position + direction * distance, center.Position)
+	camera.Parent = frame
+	frame.CurrentCamera = camera
+end
+
+return Viewport
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+    </Item>
+  </Item>
+</roblox>
