@@ -87,31 +87,34 @@ local function buildCard(bird)
 		Size = UDim2.new(1, -12, 0, 22),
 		Parent = card,
 	})
-	local perk = Pets.Perks[bird.Perk]
 	UI.label({
-		Text = bird.Rarity
-			.. "  •  🪙 "
-			.. Util.FormatNumber(bird.Reward)
-			.. "  •  "
-			.. perk.Icon
-			.. " "
-			.. perk.Name,
+		Text = bird.Rarity .. "  •  🪙 " .. Util.FormatNumber(bird.Reward),
 		TextColor3 = UI.Colors.SubText,
 		Position = UDim2.fromOffset(6, 132),
 		Size = UDim2.new(1, -12, 0, 16),
 		Parent = card,
 	})
+	-- what this bird does for your garden while it's out
+	local perk = Pets.Perks[bird.Perk]
+	UI.label({
+		Text = perk.Icon .. " " .. perk.Name .. ": " .. perk.Description,
+		TextColor3 = Color3.fromRGB(70, 130, 60),
+		TextWrapped = true,
+		Position = UDim2.fromOffset(6, 150),
+		Size = UDim2.new(1, -12, 0, 30),
+		Parent = card,
+	})
 	local count = UI.label({
 		Font = UI.TitleFont,
 		TextColor3 = UI.Colors.Text,
-		Position = UDim2.fromOffset(6, 150),
+		Position = UDim2.fromOffset(6, 182),
 		Size = UDim2.new(1, -12, 0, 16),
 		Parent = card,
 	})
 	local detail = UI.label({
 		TextColor3 = UI.Colors.SubText,
 		TextWrapped = true,
-		Position = UDim2.fromOffset(6, 168),
+		Position = UDim2.fromOffset(6, 200),
 		Size = UDim2.new(1, -12, 0, 34),
 		Parent = card,
 	})
@@ -124,7 +127,7 @@ local function build()
 	end
 	built = true
 	UI.new("UIGridLayout", {
-		CellSize = UDim2.fromOffset(180, 210),
+		CellSize = UDim2.fromOffset(180, 242),
 		CellPadding = UDim2.fromOffset(10, 10),
 		HorizontalAlignment = Enum.HorizontalAlignment.Center,
 		SortOrder = Enum.SortOrder.LayoutOrder,

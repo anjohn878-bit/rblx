@@ -28,7 +28,8 @@ local function perkSummary(perks)
 	local parts = {}
 	for _, perkId in ipairs(Pets.PerkOrder) do
 		if (perks[perkId] or 0) > 0 then
-			table.insert(parts, Pets.PerkText(perkId, perks[perkId]))
+			-- (short, so all five still fit; the Journal explains each perk)
+			table.insert(parts, Pets.PerkText(perkId, perks[perkId], true))
 		end
 	end
 	if #parts == 0 then
@@ -305,6 +306,7 @@ function AviaryWindow.Init(screenGui, callbacks)
 	}, function()
 		Actions.Pet("EquipBest")
 	end)
+	local cancelSellSpares -- set below
 	bulkRarityButton = UI.button({
 		BackgroundColor3 = UI.Colors.Wood,
 		Position = UDim2.new(0.46, 2, 0, 0),
@@ -314,10 +316,12 @@ function AviaryWindow.Init(screenGui, callbacks)
 		bulkRarity = bulkRarity % #Rarities.Order + 1
 		bulkRarityButton.Text = "≤ " .. Rarities.Order[bulkRarity] .. " ▾"
 		bulkRarityButton.TextColor3 = Rarities.Color(Rarities.Order[bulkRarity])
+		-- the "Sell N for X?" question was for the old rarity
+		cancelSellSpares()
 	end)
 	bulkRarityButton.Text = "≤ " .. Rarities.Order[bulkRarity] .. " ▾"
 	bulkRarityButton.TextColor3 = Rarities.Color(Rarities.Order[bulkRarity])
-	UI.confirmButton({
+	local _, _, disarm = UI.confirmButton({
 		Name = "SellSpares",
 		BackgroundColor3 = UI.Colors.Gold,
 		TextColor3 = UI.Colors.Text,
@@ -337,6 +341,7 @@ function AviaryWindow.Init(screenGui, callbacks)
 		end
 		return "Sell " .. count .. " for 🪙 " .. Util.FormatNumber(coins) .. "?"
 	end)
+	cancelSellSpares = disarm
 
 	Store.Changed:Connect(function(what)
 		if what == "Data" then

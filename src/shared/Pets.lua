@@ -26,6 +26,7 @@ Pets.Perks = {
 		Icon = "🌱",
 		Name = "Green Thumb",
 		Description = "plants grow faster",
+		Short = "growth",
 		PerPoint = 0.03,
 		Max = 1.5,
 	},
@@ -33,6 +34,7 @@ Pets.Perks = {
 		Icon = "🐦",
 		Name = "Social",
 		Description = "birds visit more often",
+		Short = "visits",
 		PerPoint = 0.03,
 		Max = 1,
 	},
@@ -40,6 +42,7 @@ Pets.Perks = {
 		Icon = "🍀",
 		Name = "Lucky",
 		Description = "rarer and shinier visitors",
+		Short = "luck",
 		PerPoint = 0.03,
 		Max = 1.5,
 	},
@@ -47,6 +50,7 @@ Pets.Perks = {
 		Icon = "🪙",
 		Name = "Haggler",
 		Description = "birds sell for more",
+		Short = "sell price",
 		PerPoint = 0.04,
 		Max = 2,
 	},
@@ -54,6 +58,7 @@ Pets.Perks = {
 		Icon = "🎒",
 		Name = "Seed Finder",
 		Description = "chance each minute to find a seed",
+		Short = "seed finding",
 		PerPoint = 0.07,
 		Max = 0.9,
 	},
@@ -212,10 +217,11 @@ function Pets.ComputePerks(pets, now)
 	return perks
 end
 
--- "+12% plants grow faster"
-function Pets.PerkText(perkId, amount)
+-- "🌱 +12% plants grow faster", or "🌱 +12% growth" when short
+function Pets.PerkText(perkId, amount, short)
 	local info = Pets.Perks[perkId]
-	return string.format("%s +%d%% %s", info.Icon, math.floor(amount * 100 + 0.5), info.Description)
+	local text = short and info.Short or info.Description
+	return string.format("%s +%d%% %s", info.Icon, math.floor(amount * 100 + 0.5), text)
 end
 
 -- Text for the perk a single pet gives.

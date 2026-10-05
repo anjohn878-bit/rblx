@@ -98,6 +98,8 @@ end
 local LOCK_STALE_AFTER = 300 -- seconds without a save before a lock is ignored
 local LOCK_WAIT_ATTEMPTS = 6
 local LOCK_WAIT_SECONDS = 5
+local LOAD_ATTEMPTS = 3 -- when the DataStore itself errors
+local SAVE_ATTEMPTS = 3
 
 local jobId = "studio"
 pcall(function()
@@ -122,7 +124,8 @@ local function loadAndLock(key, force)
 				return nil -- leave it alone
 			end
 			if type(stored) ~= "table" then
-				return nil -- new player: nothing to lock yet, the first save creates it
+				-- new player: write just the lock, so the key is ours from the start
+				return { Lock = { JobId = jobId, Time = os.time() } }
 			end
 			stored.Lock = { JobId = jobId, Time = os.time() }
 			return stored
@@ -131,27 +134,57 @@ local function loadAndLock(key, force)
 	return ok, result, locked, err
 end
 
+-- Gives back a lock this server holds (for a player who left while loading).
+local function unlock(key)
+	pcall(function()
+		store:UpdateAsync(key, function(stored)
+			if type(stored) == "table" and type(stored.Lock) == "table" and stored.Lock.JobId == jobId then
+				stored.Lock = nil
+				return stored
+			end
+			return nil
+		end)
+	end)
+end
+
 function DataService.Load(player)
 	local data, ok, err = nil, store ~= nil, nil
 	if store then
 		local key = keyFor(player)
-		for attempt = 1, LOCK_WAIT_ATTEMPTS + 1 do
+		local errors, waits = 0, 0
+		while true do
 			local locked
-			ok, data, locked, err = loadAndLock(key, attempt > LOCK_WAIT_ATTEMPTS)
+			-- after waiting long enough, take over the lock (that server is stuck)
+			ok, data, locked, err = loadAndLock(key, waits >= LOCK_WAIT_ATTEMPTS)
 			if ok and not locked then
 				break
 			end
-			if ok and locked and attempt == 1 then
-				Net.Notify:FireClient(
-					player,
-					"Your garden is still being saved on another server. One moment...",
-					"Info"
-				)
+			if not ok then
+				errors += 1
+				if errors >= LOAD_ATTEMPTS then
+					break
+				end
+			else
+				waits += 1
+				if waits == 1 then
+					Net.Notify:FireClient(
+						player,
+						"Your garden is still being saved on another server. One moment...",
+						"Info"
+					)
+				end
 			end
 			if player.Parent ~= Players then
 				return nil
 			end
-			task.wait(ok and LOCK_WAIT_SECONDS or attempt)
+			task.wait(ok and LOCK_WAIT_SECONDS or errors)
+		end
+		if player.Parent ~= Players then
+			-- left while loading: don't keep their save locked
+			if ok then
+				unlock(key)
+			end
+			return nil
 		end
 	end
 
@@ -190,46 +223,60 @@ function DataService.Get(player)
 end
 
 -- release = true for the final save when the player leaves (frees the lock).
+-- Retries a few times: a lost save could undo a trade on the next server.
 function DataService.Save(player, release)
 	local profile = profiles[player]
 	if not profile or not profile.CanSave or not store then
 		return false
 	end
-	local lostLock = false
-	local ok, err = pcall(function()
-		store:UpdateAsync(keyFor(player), function(stored)
-			lostLock = false
-			if lockedByOtherServer(stored) then
-				-- another server took over this player's data; don't overwrite it
-				lostLock = true
-				return nil
-			end
-			profile.Data.Lock = not release and { JobId = jobId, Time = os.time() } or nil
-			return profile.Data
+	for attempt = 1, SAVE_ATTEMPTS do
+		if profile.Released and not release then
+			return false -- the final save is already on its way; don't lock it again
+		end
+		local lostLock = false
+		local ok, err = pcall(function()
+			store:UpdateAsync(keyFor(player), function(stored)
+				lostLock = false
+				if lockedByOtherServer(stored) then
+					-- another server took over this player's data; don't overwrite it
+					lostLock = true
+					return nil
+				end
+				if profile.Released and not release then
+					return nil
+				end
+				profile.Data.Lock = not release and { JobId = jobId, Time = os.time() } or nil
+				return profile.Data
+			end)
 		end)
-	end)
-	if not ok then
+		if ok and lostLock then
+			warn("[BirdGarden] Another server owns " .. player.Name .. "'s data now; stopped saving here")
+			profile.CanSave = false
+			return false
+		elseif ok then
+			return true
+		end
 		warn("[BirdGarden] Failed to save data for", player.Name, err)
-	elseif lostLock then
-		warn("[BirdGarden] Another server owns " .. player.Name .. "'s data now; stopped saving here")
-		profile.CanSave = false
+		if attempt < SAVE_ATTEMPTS then
+			task.wait(attempt * 2)
+		end
 	end
-	return ok and not lostLock
+	return false
 end
 
 function DataService.Release(player)
+	local profile = profiles[player]
+	if profile then
+		profile.Released = true
+	end
 	DataService.Save(player, true)
-	profiles[player] = nil
-end
-
--- Drops a profile without saving it.
-function DataService.Forget(player)
 	profiles[player] = nil
 end
 
 function DataService.SaveAll()
 	local threads = {}
-	for player in pairs(profiles) do
+	for player, profile in pairs(profiles) do
+		profile.Released = true
 		table.insert(threads, task.spawn(DataService.Save, player, true))
 	end
 	-- wait (up to a limit) for the saves to finish

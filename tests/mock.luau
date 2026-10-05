@@ -399,6 +399,7 @@ end)
 
 -- DataStoreService: an in-memory store that survives "rejoins".
 Mock.SavedData = {}
+Mock.DataStoreFailures = 0 -- the next N UpdateAsync calls fail
 local function deepCopy(value)
 	if type(value) ~= "table" then
 		return value
@@ -420,6 +421,10 @@ roblox.implementMethod("DataStoreService", "GetDataStore", function(_, name)
 		end,
 		UpdateAsync = function(_, key, transform)
 			task.wait(0.1)
+			if Mock.DataStoreFailures > 0 then
+				Mock.DataStoreFailures -= 1
+				error("502: API Services rejected request (simulated)")
+			end
 			local result = transform(deepCopy(store[key]))
 			-- returning nil cancels the write, like Roblox
 			if result ~= nil then

@@ -104,27 +104,31 @@ end
 -- A button that needs two presses within a few seconds (for things that can't
 -- be undone). getText() gives its normal label and getConfirmText() the "are
 -- you sure?" label (return false to skip confirming).
--- Returns the button and a function telling whether it's waiting for the
--- second press (so refreshes don't overwrite the question).
+-- Returns the button, a function telling whether it's waiting for the second
+-- press (so refreshes don't overwrite the question) and one that cancels it.
 function UI.confirmButton(props, getText, onConfirm, getConfirmText)
 	local armedUntil = 0
+	local armedText
 	local button
 	button = UI.button(props, function()
-		if os.clock() < armedUntil then
+		local confirmText = "Sure?"
+		if getConfirmText then
+			confirmText = getConfirmText()
+		end
+		if os.clock() < armedUntil and confirmText == armedText then
 			armedUntil = 0
 			button.Text = getText()
 			onConfirm()
 			return
 		end
-		local confirmText = "Sure?"
-		if getConfirmText then
-			confirmText = getConfirmText()
-		end
 		if not confirmText then
+			armedUntil = 0
 			onConfirm()
 			return
 		end
+		-- (also re-arms when what's being confirmed changed since the first tap)
 		armedUntil = os.clock() + 3
+		armedText = confirmText
 		button.Text = confirmText
 		task.delay(3, function()
 			if os.clock() >= armedUntil then
@@ -133,9 +137,14 @@ function UI.confirmButton(props, getText, onConfirm, getConfirmText)
 		end)
 	end)
 	button.Text = getText()
-	return button, function()
+	local function isArmed()
 		return os.clock() < armedUntil
 	end
+	local function disarm()
+		armedUntil = 0
+		button.Text = getText()
+	end
+	return button, isArmed, disarm
 end
 
 -- A pop animation used when numbers change.

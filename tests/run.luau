@@ -58,6 +58,7 @@ local Seeds = Mock.Require(shared.Seeds, "server")
 local Birds = Mock.Require(shared.Birds, "server")
 local Pets = Mock.Require(shared.Pets, "server")
 local Util = Mock.Require(shared.Util, "server")
+local Rarities = Mock.Require(shared.Rarities, "server")
 local DataService = Mock.Require(server.DataService, "server")
 local PetService = Mock.Require(server.PetService, "server")
 
@@ -364,6 +365,30 @@ Mock.Advance(0.5)
 local aviary = gui:FindFirstChild("🐦 My Birds")
 check(aviary and aviary.Visible, "aviary window opens")
 check(aviary and aviary.Body:FindFirstChild(toucan) ~= nil, "aviary shows a card per bird")
+
+-- Sell spares asks first, and asks again if the rarity changes in between
+local sparePigeon = givePet(alice, { Species = "Pigeon" })
+local spareGoldfinch = givePet(alice, { Species = "Goldfinch" })
+Mock.Advance(0.5)
+local sellSpares = aviary.Bottom.SellSpares
+local rarityButton
+for _, child in ipairs(aviary.Bottom:GetChildren()) do
+	if child:IsA("TextButton") and child.Text:find("≤") then
+		rarityButton = child
+	end
+end
+Mock.SignalFor(sellSpares, "Activated"):Fire()
+check(sellSpares.Text:find("Sell 1 for") ~= nil, "Sell spares asks first (" .. sellSpares.Text .. ")")
+Mock.SignalFor(rarityButton, "Activated"):Fire()
+check(sellSpares.Text == "💰 Sell spares", "changing the rarity cancels the question")
+Mock.SignalFor(sellSpares, "Activated"):Fire()
+check(sellSpares.Text:find("Sell 2 for") ~= nil, "and the new question counts the new rarity")
+Mock.SignalFor(sellSpares, "Activated"):Fire()
+Mock.Advance(0.5)
+check(data.Pets[sparePigeon] == nil and data.Pets[spareGoldfinch] == nil, "pressing again sells them")
+for _ = 2, #Rarities.Order do
+	Mock.SignalFor(rarityButton, "Activated"):Fire()
+end
 
 -- Green Thumb: plants grow faster
 for i = 1, 5 do
@@ -838,6 +863,48 @@ Mock.Advance(1)
 local stillSaving = DataService.GetProfile(alice3).CanSave
 check(stillSaving == false, "stops saving once another server owns the save")
 check(Mock.SavedData[Config.DataStoreName]["Player_101"].Lock.JobId == "another-server", "and doesn't overwrite it")
+
+------------------------------------------------------------------------------
+section("Save lock edge cases")
+
+local function carlSave()
+	return Mock.SavedData[Config.DataStoreName]["Player_301"]
+end
+local carl = Mock.AddPlayer("Carl", 301, false)
+Mock.Advance(1)
+check(carlSave() and carlSave().Lock and carlSave().Lock.JobId == "studio", "a new player's save is locked at once")
+DataService.Get(carl).Coins = 777
+Mock.RemovePlayer(carl)
+Mock.Advance(1)
+check(carlSave().Lock == nil and carlSave().Coins == 777, "and saved and unlocked when they leave")
+
+carl = Mock.AddPlayer("Carl", 301, false)
+Mock.Advance(0.05) -- still loading
+Mock.RemovePlayer(carl)
+Mock.Advance(2)
+check(carlSave().Lock == nil, "leaving while the save loads doesn't leave it locked")
+check(DataService.GetProfile(carl) == nil, "and their data is dropped")
+
+Mock.DataStoreFailures = 10
+logStart = #Mock.RemoteLog
+carl = Mock.AddPlayer("Carl", 301, false)
+Mock.Advance(5)
+local carlProfile = DataService.GetProfile(carl)
+check(carlProfile and not carlProfile.CanSave, "gives up loading after a few DataStore errors")
+check(Mock.DataStoreFailures == 10 - 3, "after only 3 tries")
+check(carlSave().Lock == nil and carlSave().Coins == 777, "and never saves over the real save")
+Mock.DataStoreFailures = 0
+Mock.RemovePlayer(carl)
+Mock.Advance(1)
+
+carl = Mock.AddPlayer("Carl", 301, false)
+Mock.Advance(1)
+DataService.Get(carl).Coins = 888
+Mock.DataStoreFailures = 1
+Mock.RemovePlayer(carl)
+Mock.Advance(5)
+check(Mock.DataStoreFailures == 0, "the first leaving save fails")
+check(carlSave().Coins == 888 and carlSave().Lock == nil, "but is retried")
 
 Mock.RemovePlayer(alice3)
 Mock.Advance(15)

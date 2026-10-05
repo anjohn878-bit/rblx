@@ -73,10 +73,9 @@ local function onPlayerAdded(player)
 		task.spawn(onCharacterAdded, player, player.Character)
 	end
 
-	DataService.Load(player)
-	if player.Parent ~= Players then
-		-- left while their data was loading; nothing changed so don't save
-		DataService.Forget(player)
+	if not DataService.Load(player) or player.Parent ~= Players then
+		-- left while their data was loading: nothing changed, just free the save lock
+		DataService.Release(player)
 		return
 	end
 

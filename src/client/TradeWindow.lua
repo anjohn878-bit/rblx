@@ -22,7 +22,7 @@ local TradeWindow = {}
 local localPlayer = Players.LocalPlayer
 
 local window, lobby, headerInfo
-local tradeFrame, myCoinsBox, myCoinsHint, myOfferList, addList, theirTitle, theirCoins, theirList, theirReady
+local tradeFrame, myTitle, myCoinsBox, myCoinsHint, myOfferList, addList, theirTitle, theirCoins, theirList, theirReady
 local statusLabel, readyButton
 local popup, popupLabel
 local wasActive = false
@@ -205,7 +205,6 @@ local function refreshTrade(trade)
 	local myPets = data and data.Pets or {}
 
 	headerInfo.Text = "with " .. trade.PartnerName
-	theirTitle.Text = trade.PartnerName .. " gives"
 	if not myCoinsBox:IsFocused() then
 		myCoinsBox.Text = tostring(trade.MyCoins)
 	end
@@ -221,11 +220,10 @@ local function refreshTrade(trade)
 	for _, summary in ipairs(trade.TheirPets) do
 		theirTotal += summary.Value or 0
 	end
-	myCoinsHint.Text = "Worth 🪙 "
-		.. Util.FormatNumber(myTotal)
-		.. " (you have "
-		.. Util.FormatNumber(data and data.Coins or 0)
-		.. ")"
+	myTitle.Text = "You give  •  worth 🪙 " .. Util.FormatNumber(myTotal)
+	myCoinsHint.Text = "You have 🪙 " .. Util.FormatNumber(data and data.Coins or 0)
+	-- (names can be long, so their total goes on the full-width coins line)
+	theirTitle.Text = trade.PartnerName .. " gives"
 	theirCoins.Text = "🪙 "
 		.. Util.FormatNumber(trade.TheirCoins)
 		.. " coins  •  worth 🪙 "
@@ -426,7 +424,7 @@ function TradeWindow.Init(screenGui)
 
 	-- left: your side
 	local left = UI.new("Frame", { Size = UDim2.new(0.5, -5, 1, -54), BackgroundTransparency = 1, Parent = tradeFrame })
-	UI.label({
+	myTitle = UI.label({
 		Text = "You give",
 		Font = UI.TitleFont,
 		TextColor3 = UI.Colors.Wood,

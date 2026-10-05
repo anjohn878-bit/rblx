@@ -1396,7 +1396,8 @@ local function perkSummary(perks)
 	local parts = {}
 	for _, perkId in ipairs(Pets.PerkOrder) do
 		if (perks[perkId] or 0) > 0 then
-			table.insert(parts, Pets.PerkText(perkId, perks[perkId]))
+			-- (short, so all five still fit; the Journal explains each perk)
+			table.insert(parts, Pets.PerkText(perkId, perks[perkId], true))
 		end
 	end
 	if #parts == 0 then
@@ -1673,6 +1674,7 @@ function AviaryWindow.Init(screenGui, callbacks)
 	}, function()
 		Actions.Pet("EquipBest")
 	end)
+	local cancelSellSpares -- set below
 	bulkRarityButton = UI.button({
 		BackgroundColor3 = UI.Colors.Wood,
 		Position = UDim2.new(0.46, 2, 0, 0),
@@ -1682,10 +1684,12 @@ function AviaryWindow.Init(screenGui, callbacks)
 		bulkRarity = bulkRarity % #Rarities.Order + 1
 		bulkRarityButton.Text = "≤ " .. Rarities.Order[bulkRarity] .. " ▾"
 		bulkRarityButton.TextColor3 = Rarities.Color(Rarities.Order[bulkRarity])
+		-- the "Sell N for X?" question was for the old rarity
+		cancelSellSpares()
 	end)
 	bulkRarityButton.Text = "≤ " .. Rarities.Order[bulkRarity] .. " ▾"
 	bulkRarityButton.TextColor3 = Rarities.Color(Rarities.Order[bulkRarity])
-	UI.confirmButton({
+	local _, _, disarm = UI.confirmButton({
 		Name = "SellSpares",
 		BackgroundColor3 = UI.Colors.Gold,
 		TextColor3 = UI.Colors.Text,
@@ -1705,6 +1709,7 @@ function AviaryWindow.Init(screenGui, callbacks)
 		end
 		return "Sell " .. count .. " for 🪙 " .. Util.FormatNumber(coins) .. "?"
 	end)
+	cancelSellSpares = disarm
 
 	Store.Changed:Connect(function(what)
 		if what == "Data" then
@@ -1963,31 +1968,34 @@ local function buildCard(bird)
 		Size = UDim2.new(1, -12, 0, 22),
 		Parent = card,
 	})
-	local perk = Pets.Perks[bird.Perk]
 	UI.label({
-		Text = bird.Rarity
-			.. "  •  🪙 "
-			.. Util.FormatNumber(bird.Reward)
-			.. "  •  "
-			.. perk.Icon
-			.. " "
-			.. perk.Name,
+		Text = bird.Rarity .. "  •  🪙 " .. Util.FormatNumber(bird.Reward),
 		TextColor3 = UI.Colors.SubText,
 		Position = UDim2.fromOffset(6, 132),
 		Size = UDim2.new(1, -12, 0, 16),
 		Parent = card,
 	})
+	-- what this bird does for your garden while it's out
+	local perk = Pets.Perks[bird.Perk]
+	UI.label({
+		Text = perk.Icon .. " " .. perk.Name .. ": " .. perk.Description,
+		TextColor3 = Color3.fromRGB(70, 130, 60),
+		TextWrapped = true,
+		Position = UDim2.fromOffset(6, 150),
+		Size = UDim2.new(1, -12, 0, 30),
+		Parent = card,
+	})
 	local count = UI.label({
 		Font = UI.TitleFont,
 		TextColor3 = UI.Colors.Text,
-		Position = UDim2.fromOffset(6, 150),
+		Position = UDim2.fromOffset(6, 182),
 		Size = UDim2.new(1, -12, 0, 16),
 		Parent = card,
 	})
 	local detail = UI.label({
 		TextColor3 = UI.Colors.SubText,
 		TextWrapped = true,
-		Position = UDim2.fromOffset(6, 168),
+		Position = UDim2.fromOffset(6, 200),
 		Size = UDim2.new(1, -12, 0, 34),
 		Parent = card,
 	})
@@ -2000,7 +2008,7 @@ local function build()
 	end
 	built = true
 	UI.new("UIGridLayout", {
-		CellSize = UDim2.fromOffset(180, 210),
+		CellSize = UDim2.fromOffset(180, 242),
 		CellPadding = UDim2.fromOffset(10, 10),
 		HorizontalAlignment = Enum.HorizontalAlignment.Center,
 		SortOrder = Enum.SortOrder.LayoutOrder,
@@ -3643,7 +3651,7 @@ local TradeWindow = {}
 local localPlayer = Players.LocalPlayer
 
 local window, lobby, headerInfo
-local tradeFrame, myCoinsBox, myCoinsHint, myOfferList, addList, theirTitle, theirCoins, theirList, theirReady
+local tradeFrame, myTitle, myCoinsBox, myCoinsHint, myOfferList, addList, theirTitle, theirCoins, theirList, theirReady
 local statusLabel, readyButton
 local popup, popupLabel
 local wasActive = false
@@ -3826,7 +3834,6 @@ local function refreshTrade(trade)
 	local myPets = data and data.Pets or {}
 
 	headerInfo.Text = "with " .. trade.PartnerName
-	theirTitle.Text = trade.PartnerName .. " gives"
 	if not myCoinsBox:IsFocused() then
 		myCoinsBox.Text = tostring(trade.MyCoins)
 	end
@@ -3842,11 +3849,10 @@ local function refreshTrade(trade)
 	for _, summary in ipairs(trade.TheirPets) do
 		theirTotal += summary.Value or 0
 	end
-	myCoinsHint.Text = "Worth 🪙 "
-		.. Util.FormatNumber(myTotal)
-		.. " (you have "
-		.. Util.FormatNumber(data and data.Coins or 0)
-		.. ")"
+	myTitle.Text = "You give  •  worth 🪙 " .. Util.FormatNumber(myTotal)
+	myCoinsHint.Text = "You have 🪙 " .. Util.FormatNumber(data and data.Coins or 0)
+	-- (names can be long, so their total goes on the full-width coins line)
+	theirTitle.Text = trade.PartnerName .. " gives"
 	theirCoins.Text = "🪙 "
 		.. Util.FormatNumber(trade.TheirCoins)
 		.. " coins  •  worth 🪙 "
@@ -4047,7 +4053,7 @@ function TradeWindow.Init(screenGui)
 
 	-- left: your side
 	local left = UI.new("Frame", { Size = UDim2.new(0.5, -5, 1, -54), BackgroundTransparency = 1, Parent = tradeFrame })
-	UI.label({
+	myTitle = UI.label({
 		Text = "You give",
 		Font = UI.TitleFont,
 		TextColor3 = UI.Colors.Wood,
@@ -4331,27 +4337,31 @@ end
 -- A button that needs two presses within a few seconds (for things that can't
 -- be undone). getText() gives its normal label and getConfirmText() the "are
 -- you sure?" label (return false to skip confirming).
--- Returns the button and a function telling whether it's waiting for the
--- second press (so refreshes don't overwrite the question).
+-- Returns the button, a function telling whether it's waiting for the second
+-- press (so refreshes don't overwrite the question) and one that cancels it.
 function UI.confirmButton(props, getText, onConfirm, getConfirmText)
 	local armedUntil = 0
+	local armedText
 	local button
 	button = UI.button(props, function()
-		if os.clock() < armedUntil then
+		local confirmText = "Sure?"
+		if getConfirmText then
+			confirmText = getConfirmText()
+		end
+		if os.clock() < armedUntil and confirmText == armedText then
 			armedUntil = 0
 			button.Text = getText()
 			onConfirm()
 			return
 		end
-		local confirmText = "Sure?"
-		if getConfirmText then
-			confirmText = getConfirmText()
-		end
 		if not confirmText then
+			armedUntil = 0
 			onConfirm()
 			return
 		end
+		-- (also re-arms when what's being confirmed changed since the first tap)
 		armedUntil = os.clock() + 3
+		armedText = confirmText
 		button.Text = confirmText
 		task.delay(3, function()
 			if os.clock() >= armedUntil then
@@ -4360,9 +4370,14 @@ function UI.confirmButton(props, getText, onConfirm, getConfirmText)
 		end)
 	end)
 	button.Text = getText()
-	return button, function()
+	local function isArmed()
 		return os.clock() < armedUntil
 	end
+	local function disarm()
+		armedUntil = 0
+		button.Text = getText()
+	end
+	return button, isArmed, disarm
 end
 
 -- A pop animation used when numbers change.
@@ -5831,6 +5846,7 @@ Pets.Perks = {
 		Icon = "🌱",
 		Name = "Green Thumb",
 		Description = "plants grow faster",
+		Short = "growth",
 		PerPoint = 0.03,
 		Max = 1.5,
 	},
@@ -5838,6 +5854,7 @@ Pets.Perks = {
 		Icon = "🐦",
 		Name = "Social",
 		Description = "birds visit more often",
+		Short = "visits",
 		PerPoint = 0.03,
 		Max = 1,
 	},
@@ -5845,6 +5862,7 @@ Pets.Perks = {
 		Icon = "🍀",
 		Name = "Lucky",
 		Description = "rarer and shinier visitors",
+		Short = "luck",
 		PerPoint = 0.03,
 		Max = 1.5,
 	},
@@ -5852,6 +5870,7 @@ Pets.Perks = {
 		Icon = "🪙",
 		Name = "Haggler",
 		Description = "birds sell for more",
+		Short = "sell price",
 		PerPoint = 0.04,
 		Max = 2,
 	},
@@ -5859,6 +5878,7 @@ Pets.Perks = {
 		Icon = "🎒",
 		Name = "Seed Finder",
 		Description = "chance each minute to find a seed",
+		Short = "seed finding",
 		PerPoint = 0.07,
 		Max = 0.9,
 	},
@@ -6017,10 +6037,11 @@ function Pets.ComputePerks(pets, now)
 	return perks
 end
 
--- "+12% plants grow faster"
-function Pets.PerkText(perkId, amount)
+-- "🌱 +12% plants grow faster", or "🌱 +12% growth" when short
+function Pets.PerkText(perkId, amount, short)
 	local info = Pets.Perks[perkId]
-	return string.format("%s +%d%% %s", info.Icon, math.floor(amount * 100 + 0.5), info.Description)
+	local text = short and info.Short or info.Description
+	return string.format("%s +%d%% %s", info.Icon, math.floor(amount * 100 + 0.5), text)
 end
 
 -- Text for the perk a single pet gives.
@@ -7474,6 +7495,8 @@ end
 local LOCK_STALE_AFTER = 300 -- seconds without a save before a lock is ignored
 local LOCK_WAIT_ATTEMPTS = 6
 local LOCK_WAIT_SECONDS = 5
+local LOAD_ATTEMPTS = 3 -- when the DataStore itself errors
+local SAVE_ATTEMPTS = 3
 
 local jobId = "studio"
 pcall(function()
@@ -7498,7 +7521,8 @@ local function loadAndLock(key, force)
 				return nil -- leave it alone
 			end
 			if type(stored) ~= "table" then
-				return nil -- new player: nothing to lock yet, the first save creates it
+				-- new player: write just the lock, so the key is ours from the start
+				return { Lock = { JobId = jobId, Time = os.time() } }
 			end
 			stored.Lock = { JobId = jobId, Time = os.time() }
 			return stored
@@ -7507,27 +7531,57 @@ local function loadAndLock(key, force)
 	return ok, result, locked, err
 end
 
+-- Gives back a lock this server holds (for a player who left while loading).
+local function unlock(key)
+	pcall(function()
+		store:UpdateAsync(key, function(stored)
+			if type(stored) == "table" and type(stored.Lock) == "table" and stored.Lock.JobId == jobId then
+				stored.Lock = nil
+				return stored
+			end
+			return nil
+		end)
+	end)
+end
+
 function DataService.Load(player)
 	local data, ok, err = nil, store ~= nil, nil
 	if store then
 		local key = keyFor(player)
-		for attempt = 1, LOCK_WAIT_ATTEMPTS + 1 do
+		local errors, waits = 0, 0
+		while true do
 			local locked
-			ok, data, locked, err = loadAndLock(key, attempt > LOCK_WAIT_ATTEMPTS)
+			-- after waiting long enough, take over the lock (that server is stuck)
+			ok, data, locked, err = loadAndLock(key, waits >= LOCK_WAIT_ATTEMPTS)
 			if ok and not locked then
 				break
 			end
-			if ok and locked and attempt == 1 then
-				Net.Notify:FireClient(
-					player,
-					"Your garden is still being saved on another server. One moment...",
-					"Info"
-				)
+			if not ok then
+				errors += 1
+				if errors >= LOAD_ATTEMPTS then
+					break
+				end
+			else
+				waits += 1
+				if waits == 1 then
+					Net.Notify:FireClient(
+						player,
+						"Your garden is still being saved on another server. One moment...",
+						"Info"
+					)
+				end
 			end
 			if player.Parent ~= Players then
 				return nil
 			end
-			task.wait(ok and LOCK_WAIT_SECONDS or attempt)
+			task.wait(ok and LOCK_WAIT_SECONDS or errors)
+		end
+		if player.Parent ~= Players then
+			-- left while loading: don't keep their save locked
+			if ok then
+				unlock(key)
+			end
+			return nil
 		end
 	end
 
@@ -7566,46 +7620,60 @@ function DataService.Get(player)
 end
 
 -- release = true for the final save when the player leaves (frees the lock).
+-- Retries a few times: a lost save could undo a trade on the next server.
 function DataService.Save(player, release)
 	local profile = profiles[player]
 	if not profile or not profile.CanSave or not store then
 		return false
 	end
-	local lostLock = false
-	local ok, err = pcall(function()
-		store:UpdateAsync(keyFor(player), function(stored)
-			lostLock = false
-			if lockedByOtherServer(stored) then
-				-- another server took over this player's data; don't overwrite it
-				lostLock = true
-				return nil
-			end
-			profile.Data.Lock = not release and { JobId = jobId, Time = os.time() } or nil
-			return profile.Data
+	for attempt = 1, SAVE_ATTEMPTS do
+		if profile.Released and not release then
+			return false -- the final save is already on its way; don't lock it again
+		end
+		local lostLock = false
+		local ok, err = pcall(function()
+			store:UpdateAsync(keyFor(player), function(stored)
+				lostLock = false
+				if lockedByOtherServer(stored) then
+					-- another server took over this player's data; don't overwrite it
+					lostLock = true
+					return nil
+				end
+				if profile.Released and not release then
+					return nil
+				end
+				profile.Data.Lock = not release and { JobId = jobId, Time = os.time() } or nil
+				return profile.Data
+			end)
 		end)
-	end)
-	if not ok then
+		if ok and lostLock then
+			warn("[BirdGarden] Another server owns " .. player.Name .. "'s data now; stopped saving here")
+			profile.CanSave = false
+			return false
+		elseif ok then
+			return true
+		end
 		warn("[BirdGarden] Failed to save data for", player.Name, err)
-	elseif lostLock then
-		warn("[BirdGarden] Another server owns " .. player.Name .. "'s data now; stopped saving here")
-		profile.CanSave = false
+		if attempt < SAVE_ATTEMPTS then
+			task.wait(attempt * 2)
+		end
 	end
-	return ok and not lostLock
+	return false
 end
 
 function DataService.Release(player)
+	local profile = profiles[player]
+	if profile then
+		profile.Released = true
+	end
 	DataService.Save(player, true)
-	profiles[player] = nil
-end
-
--- Drops a profile without saving it.
-function DataService.Forget(player)
 	profiles[player] = nil
 end
 
 function DataService.SaveAll()
 	local threads = {}
-	for player in pairs(profiles) do
+	for player, profile in pairs(profiles) do
+		profile.Released = true
 		table.insert(threads, task.spawn(DataService.Save, player, true))
 	end
 	-- wait (up to a limit) for the saves to finish
@@ -7765,10 +7833,9 @@ local function onPlayerAdded(player)
 		task.spawn(onCharacterAdded, player, player.Character)
 	end
 
-	DataService.Load(player)
-	if player.Parent ~= Players then
-		-- left while their data was loading; nothing changed so don't save
-		DataService.Forget(player)
+	if not DataService.Load(player) or player.Parent ~= Players then
+		-- left while their data was loading: nothing changed, just free the save lock
+		DataService.Release(player)
 		return
 	end
 
