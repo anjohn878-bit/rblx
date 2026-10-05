@@ -1,0 +1,23 @@
+{
+  "name": "BuildADressStore",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "DressStore": {
+        "$path": "src/ReplicatedStorage/DressStore"
+      }
+    },
+    "ServerScriptService": {
+      "DressStoreServer": {
+        "$path": "src/ServerScriptService/DressStoreServer"
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "DressStoreClient": {
+          "$path": "src/StarterPlayer/StarterPlayerScripts/DressStoreClient.client.lua"
+        }
+      }
+    }
+  }
+}
