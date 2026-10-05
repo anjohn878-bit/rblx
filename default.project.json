@@ -1,0 +1,23 @@
+{
+  "name": "GrowABirdGarden",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Shared": {
+        "$path": "src/shared"
+      }
+    },
+    "ServerScriptService": {
+      "BirdGardenServer": {
+        "$path": "src/server"
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "BirdGardenClient": {
+          "$path": "src/client"
+        }
+      }
+    }
+  }
+}
