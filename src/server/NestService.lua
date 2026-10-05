@@ -278,6 +278,7 @@ local function hatch(player, data, key, entry, now)
 				"Error"
 			)
 			NestService.UpdateVisuals(player)
+			DataService.Push(player)
 		end
 		return false
 	end
@@ -285,7 +286,7 @@ local function hatch(player, data, key, entry, now)
 	local newFamily = false
 	local family = a.Family or b.Family
 	if not family then
-		family = PetService.RandomFamilyName()
+		family = PetService.NewFamilyName(data)
 		newFamily = true
 	end
 	a.Family = a.Family or family

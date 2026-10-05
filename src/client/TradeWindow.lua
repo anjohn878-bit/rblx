@@ -209,8 +209,27 @@ local function refreshTrade(trade)
 	if not myCoinsBox:IsFocused() then
 		myCoinsBox.Text = tostring(trade.MyCoins)
 	end
-	myCoinsHint.Text = "You have 🪙 " .. Util.FormatNumber(data and data.Coins or 0)
-	theirCoins.Text = "🪙 " .. Util.FormatNumber(trade.TheirCoins) .. " coins"
+	-- show what each side is worth so lopsided trades are easy to spot
+	local myTotal = trade.MyCoins
+	for _, petId in ipairs(trade.MyPets) do
+		local pet = myPets[petId]
+		if pet then
+			myTotal += Pets.BaseValue(pet, now)
+		end
+	end
+	local theirTotal = trade.TheirCoins
+	for _, summary in ipairs(trade.TheirPets) do
+		theirTotal += summary.Value or 0
+	end
+	myCoinsHint.Text = "Worth 🪙 "
+		.. Util.FormatNumber(myTotal)
+		.. " (you have "
+		.. Util.FormatNumber(data and data.Coins or 0)
+		.. ")"
+	theirCoins.Text = "🪙 "
+		.. Util.FormatNumber(trade.TheirCoins)
+		.. " coins  •  worth 🪙 "
+		.. Util.FormatNumber(theirTotal)
 
 	clearRows(myOfferList)
 	if #trade.MyPets == 0 then
@@ -223,7 +242,7 @@ local function refreshTrade(trade)
 			row(
 				myOfferList,
 				order,
-				petLine(pet.Name, pet.Species, pet.Stars, pet.Shiny, Pets.IsBaby(pet, now)),
+				petLine(pet.Name, pet.Species, pet.Stars, pet.Shiny, Pets.IsBaby(pet, now), Pets.BaseValue(pet, now)),
 				Rarities.Color(def.Rarity),
 				"Remove",
 				UI.Colors.Red,
@@ -243,7 +262,7 @@ local function refreshTrade(trade)
 			row(
 				addList,
 				order,
-				petLine(pet.Name, pet.Species, pet.Stars, pet.Shiny, Pets.IsBaby(pet, now)),
+				petLine(pet.Name, pet.Species, pet.Stars, pet.Shiny, Pets.IsBaby(pet, now), Pets.BaseValue(pet, now)),
 				Rarities.Color(Pets.Def(pet).Rarity),
 				"Add",
 				UI.Colors.Green,
@@ -298,10 +317,6 @@ end
 local function refresh()
 	local trade = Store.Trade
 	local active = trade ~= nil and trade.Active
-	if active and not wasActive then
-		-- a trade just started: show it
-		window.Visible = true
-	end
 	wasActive = active
 	lobby.Visible = not active
 	tradeFrame.Visible = active
@@ -348,6 +363,7 @@ local function buildPopup(screenGui)
 		Size = UDim2.fromOffset(340, 96),
 		BackgroundColor3 = UI.Colors.Panel,
 		Visible = false,
+		ZIndex = 20, -- above any open window
 		Parent = screenGui,
 	}, { UI.corner(14), UI.stroke(UI.Colors.Wood, 3) })
 	popupLabel = UI.label({
@@ -447,17 +463,17 @@ function TradeWindow.Init(screenGui)
 		Size = UDim2.new(0.55, -6, 0, 18),
 		Parent = left,
 	})
-	myOfferList = scrollList(left, UDim2.fromOffset(0, 56), UDim2.new(1, 0, 0.42, -56))
+	myOfferList = scrollList(left, UDim2.fromOffset(0, 56), UDim2.new(1, 0, 0.5, -56))
 	UI.label({
 		Text = "Add a bird (up to " .. Config.TradeMaxPets .. ")",
 		Font = UI.TitleFont,
 		TextColor3 = UI.Colors.Wood,
 		TextXAlignment = Enum.TextXAlignment.Left,
-		Position = UDim2.new(0, 0, 0.42, 4),
+		Position = UDim2.new(0, 0, 0.5, 4),
 		Size = UDim2.new(1, 0, 0, 20),
 		Parent = left,
 	})
-	addList = scrollList(left, UDim2.new(0, 0, 0.42, 26), UDim2.new(1, 0, 0.58, -26))
+	addList = scrollList(left, UDim2.new(0, 0, 0.5, 26), UDim2.new(1, 0, 0.5, -26))
 
 	-- right: their side
 	local right = UI.new("Frame", {
@@ -511,7 +527,8 @@ function TradeWindow.Init(screenGui)
 	}, function()
 		local trade = Store.Trade
 		if trade and trade.Active then
-			Net.TradeUpdate:FireServer(trade.MyReady and "Unready" or "Ready")
+			-- Ready is tied to the version of the offer on screen
+			Net.TradeUpdate:FireServer(trade.MyReady and "Unready" or "Ready", trade.Revision)
 		end
 	end)
 	UI.button({

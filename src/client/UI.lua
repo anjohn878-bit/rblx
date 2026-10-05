@@ -101,6 +101,43 @@ function UI.button(props, onClick)
 	return button
 end
 
+-- A button that needs two presses within a few seconds (for things that can't
+-- be undone). getText() gives its normal label and getConfirmText() the "are
+-- you sure?" label (return false to skip confirming).
+-- Returns the button and a function telling whether it's waiting for the
+-- second press (so refreshes don't overwrite the question).
+function UI.confirmButton(props, getText, onConfirm, getConfirmText)
+	local armedUntil = 0
+	local button
+	button = UI.button(props, function()
+		if os.clock() < armedUntil then
+			armedUntil = 0
+			button.Text = getText()
+			onConfirm()
+			return
+		end
+		local confirmText = "Sure?"
+		if getConfirmText then
+			confirmText = getConfirmText()
+		end
+		if not confirmText then
+			onConfirm()
+			return
+		end
+		armedUntil = os.clock() + 3
+		button.Text = confirmText
+		task.delay(3, function()
+			if os.clock() >= armedUntil then
+				button.Text = getText()
+			end
+		end)
+	end)
+	button.Text = getText()
+	return button, function()
+		return os.clock() < armedUntil
+	end
+end
+
 -- A pop animation used when numbers change.
 function UI.pop(guiObject)
 	local scale = guiObject:FindFirstChildOfClass("UIScale") or UI.new("UIScale", { Parent = guiObject })

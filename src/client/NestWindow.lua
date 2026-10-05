@@ -257,15 +257,19 @@ function NestWindow.Init(screenGui)
 			Size = UDim2.new(1, -110, 1, -8),
 			Parent = row,
 		})
-		local cancel = UI.button({
-			Text = "Cancel",
+		-- cancelling throws the egg away, so it needs a second tap
+		local cancel = UI.confirmButton({
 			BackgroundColor3 = UI.Colors.Red,
 			AnchorPoint = Vector2.new(1, 0.5),
 			Position = UDim2.new(1, -6, 0.5, 0),
 			Size = UDim2.fromOffset(90, 30),
 			Parent = row,
 		}, function()
+			return "Cancel"
+		end, function()
 			Actions.Pet("CancelNest", index)
+		end, function()
+			return "Lose egg?"
 		end)
 		nestRows[index] = { Label = label, Cancel = cancel }
 	end

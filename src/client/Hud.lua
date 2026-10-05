@@ -3,6 +3,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared:WaitForChild("Config"))
 local Pets = require(Shared:WaitForChild("Pets"))
 local Util = require(Shared:WaitForChild("Util"))
 local Store = require(script.Parent.Store)
@@ -77,8 +78,8 @@ function Hud.Init(screenGui, callbacks)
 
 	local buttons = UI.new("Frame", {
 		Name = "Buttons",
-		AnchorPoint = Vector2.new(0, 0.5),
-		Position = UDim2.new(0, 12, 0.5, 0),
+		-- below the coin and bird counters
+		Position = UDim2.fromOffset(12, 116),
 		Size = UDim2.fromOffset(70, 400),
 		BackgroundTransparency = 1,
 		Parent = root,
@@ -86,7 +87,7 @@ function Hud.Init(screenGui, callbacks)
 		UI.new("UIListLayout", {
 			Padding = UDim.new(0, 10),
 			SortOrder = Enum.SortOrder.LayoutOrder,
-			VerticalAlignment = Enum.VerticalAlignment.Center,
+			VerticalAlignment = Enum.VerticalAlignment.Top,
 		}),
 	})
 	sideButton(buttons, 1, "🌱", "Seeds", Color3.fromRGB(95, 180, 80), callbacks.OnSeeds)
@@ -105,7 +106,9 @@ function Hud.Init(screenGui, callbacks)
 		end
 		coinLabel.Text = Util.FormatNumber(data.Coins)
 		birdLabel.Text = Pets.CountPets(data.Pets or {})
-			.. " birds  •  "
+			.. "/"
+			.. Config.MaxPets
+			.. "  •  "
 			.. Pets.CountEquipped(data.Pets or {})
 			.. " out"
 		if lastCoins and data.Coins ~= lastCoins then

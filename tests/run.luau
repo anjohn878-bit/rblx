@@ -127,6 +127,8 @@ check(spawnDistance < 30, "character teleported to their garden")
 
 local gui = alice.PlayerGui:FindFirstChild("BirdGardenUI")
 check(gui ~= nil, "UI created")
+gui = gui and gui:FindFirstChild("Root")
+check(gui ~= nil, "UI has a scaling root")
 local ClientStore = Mock.Require(client.Store, "client")
 check(ClientStore.Data and ClientStore.Data.Coins == Config.StartingCoins, "client received state")
 local slots = gui.SeedBag.Slots
@@ -313,6 +315,15 @@ check(
 	"only 6 birds out at once (" .. tostring(message) .. ")"
 )
 
+-- a better bird takes the place of the weakest one that's out
+local hummingbirdDef = Birds.Get("Hummingbird")
+local _, swappedId, _, _, _, replaced = PetService.Befriend(alice, hummingbirdDef, false)
+check(
+	replaced ~= nil and data.Pets[swappedId].Equipped and not replaced.Equipped,
+	"a better new bird swaps in for the weakest one out"
+)
+check(Pets.CountEquipped(data.Pets) == Config.MaxEquippedPets, "still only 6 out after a swap")
+
 local spare = sparrows[6]
 petAction("Favorite", spare, true)
 ok = petAction("Sell", spare)
@@ -373,11 +384,15 @@ local function seedCount()
 	return total
 end
 local finders = { toucan }
-petAction("Equip", toucan)
 for i = 1, 3 do
 	finders[i + 1] = givePet(alice, { Species = "Toucan", Stars = 5, Shiny = true })
-	petAction("Equip", finders[i + 1])
 end
+ok = petAction("EquipBest")
+check(ok and Pets.CountEquipped(data.Pets) == Config.MaxEquippedPets, "Best out fills every spot")
+check(
+	data.Pets[finders[2]].Equipped and data.Pets[finders[4]].Equipped and not data.Pets[sparrows[1]].Equipped,
+	"Best out picks the strongest birds"
+)
 check(PetService.GetPerks(alice).SeedFinder >= 0.89, "seed finder chance is capped at 90%")
 local seedsBefore = seedCount()
 local logStart = #Mock.RemoteLog
@@ -531,6 +546,22 @@ check(babyMarker and babyMarker:GetAttribute("Follow") == "101_" .. mum, "baby f
 
 ok = petAction("Breed", babyId, mum)
 check(not ok, "babies are too young to breed")
+local uniqueNames = true
+for _ = 1, 30 do
+	if PetService.NewFamilyName(data) == baby.Family then
+		uniqueNames = false
+	end
+end
+check(uniqueNames, "new families never reuse a surname already in the aviary")
+for _, id in ipairs({ mum, dad, babyId }) do
+	petAction("Unequip", id)
+end
+petAction("SellBulk", "Mythic")
+check(data.Pets[mum] and data.Pets[dad] and data.Pets[babyId], "Sell spares keeps family members and babies")
+check(data.Pets[finders[2]] ~= nil, "Sell spares keeps shiny birds")
+check(data.Pets[jay] == nil, "but sells plain spares")
+jay = givePet(alice, { Species = "BlueJay" })
+petAction("Equip", babyId)
 Mock.Advance(Pets.GrowUpTime("Cardinal") + 1, 1)
 check(baby.GrowsUpAt == nil, "baby grows up")
 check(markers:FindFirstChild("101_" .. babyId):GetAttribute("Baby") == false, "grown-up is drawn full size")
@@ -567,6 +598,22 @@ local function bobDoes(action, value)
 	Mock.SignalFor(Net.TradeUpdate, "OnServerEvent"):Fire(bob, action, value)
 	Mock.Advance(0.1)
 end
+local function lastStateFor(name)
+	for i = #Mock.RemoteLog, 1, -1 do
+		local entry = Mock.RemoteLog[i]
+		if entry.Remote == "TradeState" and entry.Player == name then
+			return entry.Args[1]
+		end
+	end
+	return nil
+end
+local function aliceReady()
+	Net.TradeUpdate:FireServer("Ready", ClientStore.Trade.Revision)
+	Mock.Advance(0.1)
+end
+local function bobReady()
+	bobDoes("Ready", lastStateFor("Bob").Revision)
+end
 Net.TradeUpdate:FireServer("AddPet", jay)
 bobDoes("AddPet", peacock)
 bobDoes("SetCoins", 100)
@@ -583,14 +630,21 @@ check(#ClientStore.Trade.MyPets == 1, "favorites can't be offered")
 Net.TradeUpdate:FireServer("AddPet", mum)
 Mock.Advance(0.1)
 
-Net.TradeUpdate:FireServer("Ready")
-bobDoes("Ready")
+local staleRevision = ClientStore.Trade.Revision
+bobDoes("SetCoins", 120)
+Net.TradeUpdate:FireServer("Ready", staleRevision)
+Mock.Advance(0.1)
+check(not ClientStore.Trade.MyReady, "Ready for an older version of the offer is ignored")
+bobDoes("SetCoins", 100)
+aliceReady()
+bobReady()
 check(ClientStore.Trade.ExecuteAt ~= nil, "both ready starts the countdown")
 bobDoes("SetCoins", 50)
 check(not ClientStore.Trade.MyReady and ClientStore.Trade.ExecuteAt == nil, "any change un-readies both")
 Net.TradeUpdate:FireServer("RemovePet", mum)
-Net.TradeUpdate:FireServer("Ready")
-bobDoes("Ready")
+Mock.Advance(0.1)
+aliceReady()
+bobReady()
 local aliceCoins, bobCoins = data.Coins, bobData.Coins
 Mock.Advance(Config.TradeCountdown + 1)
 local gotPeacock = false
@@ -619,6 +673,15 @@ for _, pet in pairs(savedBob.Pets) do
 end
 check(not savedHasPeacock, "trade is saved straight away")
 
+-- no trading with someone whose progress can't be saved
+Mock.Advance(Config.TradeRequestCooldown + 1)
+DataService.GetProfile(bob).CanSave = false
+logStart = #Mock.RemoteLog
+Net.TradeRequest:FireServer(bob.UserId)
+Mock.Advance(0.1)
+check(notified("can't be saved", logStart), "trading is paused if one save didn't load")
+DataService.GetProfile(bob).CanSave = true
+
 -- coins are capped, and leaving cancels the trade
 Mock.Advance(Config.TradeRequestCooldown + 1)
 Net.TradeRequest:FireServer(bob.UserId)
@@ -632,6 +695,32 @@ check(ClientStore.Trade.TheirCoins == bobData.Coins, "nonsense coin amounts are 
 Mock.RemovePlayer(bob)
 Mock.Advance(0.5)
 check(ClientStore.Trade and not ClientStore.Trade.Active, "trade ends when the other player leaves")
+
+------------------------------------------------------------------------------
+section("A full aviary")
+
+while Pets.CountPets(data.Pets) < Config.MaxPets do
+	PetService.AddPet(data, PetService.NewPet({ Species = "Sparrow" }))
+end
+PetService.Refresh(alice)
+local refused = { PetService.Befriend(alice, Birds.Get("Hummingbird"), false) }
+check(
+	refused[5] == "Full" and Pets.CountPets(data.Pets) == Config.MaxPets,
+	"a full aviary never throws away a rare bird"
+)
+local shinyRefused = { PetService.Befriend(alice, birdDef, true) }
+check(shinyRefused[5] == "Full", "or a shiny one")
+local soldPlain = false
+for _ = 1, 30 do
+	local result = { PetService.Befriend(alice, birdDef, false) }
+	if result[1] and not result[2] and result[3] > 0 then
+		soldPlain = true
+		break
+	end
+end
+check(soldPlain and Pets.CountPets(data.Pets) == Config.MaxPets, "a plain common bird is sold straight away")
+petAction("SellBulk", "Common")
+check(Pets.CountPets(data.Pets) < Config.MaxPets - 10, "Sell spares makes room again")
 
 ------------------------------------------------------------------------------
 section("Restock")
@@ -666,12 +755,24 @@ Mock.Advance(1)
 check(plot1.GateSign.Sign.Label.Text == "Empty Garden", "plot is freed")
 check(#plot1.Plants:GetChildren() == 0, "plants are cleared from the world")
 
+-- pretend another server still has Alice's save open
+local savedAlice = Mock.SavedData[Config.DataStoreName]["Player_101"]
+check(savedAlice.Lock == nil, "leaving releases the save lock")
+savedAlice.Lock = { JobId = "another-server", Time = math.floor(Util.Now()) }
+logStart = #Mock.RemoteLog
 local alice2 = Mock.AddPlayer("Alice", 101, false)
 Mock.SpawnCharacter(alice2)
 Mock.Advance(2)
+check(DataService.Get(alice2) == nil, "waits while another server holds the save")
+check(notified("another server", logStart), "and tells the player")
+Mock.Advance(40)
 local data2 = DataService.Get(alice2)
+check(
+	Mock.SavedData[Config.DataStoreName]["Player_101"].Lock.JobId == "studio",
+	"takes over a lock that is never released"
+)
 check(data2 and data2.Coins == coinsAtLeave, "coins were saved")
-check(data2 and data2.Journal[birdDef.Id] == 1, "journal was saved")
+check(data2 and data2.Journal[birdDef.Id] and data2.Journal[birdDef.Id] >= 1, "journal was saved")
 check(data2 and Pets.CountPets(data2.Pets) == petsAtLeave, "pets were saved")
 check(data2 and data2.Pets[babyId] and data2.Pets[babyId].Family == baby.Family, "families were saved")
 local newPlot = plotsFolder:FindFirstChild("Plot" .. alice2:GetAttribute("PlotId"))
@@ -730,6 +831,13 @@ for _ = 1, 30 do
 	end
 end
 check(data3.TotalBefriended > 10, "befriended lots of birds over 30 minutes (" .. data3.TotalBefriended .. ")")
+
+Mock.SavedData[Config.DataStoreName]["Player_101"].Lock = { JobId = "another-server", Time = math.floor(Util.Now()) }
+Mock.task.spawn(DataService.Save, alice3)
+Mock.Advance(1)
+local stillSaving = DataService.GetProfile(alice3).CanSave
+check(stillSaving == false, "stops saving once another server owns the save")
+check(Mock.SavedData[Config.DataStoreName]["Player_101"].Lock.JobId == "another-server", "and doesn't overwrite it")
 
 Mock.RemovePlayer(alice3)
 Mock.Advance(15)

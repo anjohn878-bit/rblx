@@ -113,7 +113,19 @@ local function befriend(bird, player)
 		return
 	end
 	local def = bird.Def
-	local pet, petId, coins, firstTime = PetService.Befriend(player, def, bird.Shiny)
+	local pet, petId, coins, firstTime, refusal, replaced = PetService.Befriend(player, def, bird.Shiny)
+	if refusal == "Full" then
+		-- special birds wait on their perch while the player makes room
+		Net.Notify:FireClient(
+			player,
+			"🐦 Your aviary is full! Sell spares or trade in 🐦 Birds to make room for this "
+				.. (bird.Shiny and "✨ Shiny " or "")
+				.. def.Name
+				.. ".",
+			"Error"
+		)
+		return
+	end
 	if not pet then
 		return
 	end
@@ -144,9 +156,20 @@ local function befriend(bird, player)
 		Net.Effect:FireClient(
 			player,
 			position + Vector3.new(0, 2, 0),
-			pet.Name .. " " .. Pets.StarText(pet.Stars),
+			pet.Name
+				.. " "
+				.. Pets.StarText(pet.Stars)
+				.. "  •  worth 🪙 "
+				.. Util.FormatNumber(Pets.BaseValue(pet, Util.Now())),
 			bird.Shiny and Color3.fromRGB(255, 230, 120) or Rarities.Color(def.Rarity)
 		)
+		if replaced then
+			Net.Notify:FireClient(
+				player,
+				"🔁 " .. pet.Name .. " the " .. def.Name .. " took " .. replaced.Name .. "'s spot in your garden.",
+				"Info"
+			)
+		end
 		if bird.Shiny or Rarities.Rank(def.Rarity) >= Rarities.Rank("Rare") or pet.Stars >= 3 then
 			Net.Notify:FireClient(
 				player,
@@ -159,6 +182,12 @@ local function befriend(bird, player)
 			local marker = PetService.FindMarker(player, petId)
 			if marker then
 				marker:SetAttribute("SpawnAt", position)
+				-- only clients drawing it right now need the starting spot
+				task.delay(3, function()
+					if marker.Parent then
+						marker:SetAttribute("SpawnAt", nil)
+					end
+				end)
 			end
 			bird.Gone = true
 			local state = bird.State
@@ -170,6 +199,12 @@ local function befriend(bird, player)
 			model:Destroy()
 		else
 			-- no room to roam: it flies off to the aviary
+			Net.Effect:FireClient(
+				player,
+				position + Vector3.new(0, 3.2, 0),
+				"🏠 Off to your aviary",
+				Color3.fromRGB(200, 230, 255)
+			)
 			task.delay(0.3, flyAway, bird)
 		end
 	else

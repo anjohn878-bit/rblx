@@ -6,6 +6,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local BirdBuilder = require(Shared.BirdBuilder)
 local Birds = require(Shared.Birds)
+local Pets = require(Shared.Pets)
 local Rarities = require(Shared.Rarities)
 local Seeds = require(Shared.Seeds)
 local Util = require(Shared.Util)
@@ -86,8 +87,15 @@ local function buildCard(bird)
 		Size = UDim2.new(1, -12, 0, 22),
 		Parent = card,
 	})
+	local perk = Pets.Perks[bird.Perk]
 	UI.label({
-		Text = bird.Rarity .. "  •  🪙 " .. Util.FormatNumber(bird.Reward),
+		Text = bird.Rarity
+			.. "  •  🪙 "
+			.. Util.FormatNumber(bird.Reward)
+			.. "  •  "
+			.. perk.Icon
+			.. " "
+			.. perk.Name,
 		TextColor3 = UI.Colors.SubText,
 		Position = UDim2.fromOffset(6, 132),
 		Size = UDim2.new(1, -12, 0, 16),

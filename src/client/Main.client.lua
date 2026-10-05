@@ -31,11 +31,34 @@ screenGui.ResetOnSpawn = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = player:WaitForChild("PlayerGui")
 
-Notifications.Init(screenGui)
-ShopWindow.Init(screenGui)
-JournalWindow.Init(screenGui)
-TradeWindow.Init(screenGui)
-NestWindow.Init(screenGui)
+-- Everything is laid out for screens at least 560px tall; on smaller screens
+-- (phones) the whole interface is scaled down to fit.
+local DESIGN_HEIGHT = 560
+local root = Instance.new("Frame")
+root.Name = "Root"
+root.BackgroundTransparency = 1
+root.Parent = screenGui
+local rootScale = Instance.new("UIScale")
+rootScale.Parent = root
+local function fitToScreen()
+	-- (pcall: the offline test harness has no layout engine)
+	local ok, size = pcall(function()
+		return screenGui.AbsoluteSize
+	end)
+	local height = ok and size.Y or 0
+	local scale = height > 0 and math.clamp(height / DESIGN_HEIGHT, 0.6, 1) or 1
+	rootScale.Scale = scale
+	-- the frame is scaled down, so make it bigger to still cover the screen
+	root.Size = UDim2.fromScale(1 / scale, 1 / scale)
+end
+fitToScreen()
+screenGui:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitToScreen)
+
+Notifications.Init(root)
+ShopWindow.Init(root)
+JournalWindow.Init(root)
+TradeWindow.Init(root)
+NestWindow.Init(root)
 
 local windows = { ShopWindow, JournalWindow, AviaryWindow, NestWindow, TradeWindow }
 
@@ -65,9 +88,9 @@ local function openNests(nestIndex)
 	show(NestWindow, nestIndex)
 end
 
-AviaryWindow.Init(screenGui, { OpenNests = openNests })
+AviaryWindow.Init(root, { OpenNests = openNests })
 
-Hud.Init(screenGui, {
+Hud.Init(root, {
 	OnSeeds = function()
 		toggle(ShopWindow)
 	end,
@@ -84,7 +107,7 @@ Hud.Init(screenGui, {
 		toggle(TradeWindow)
 	end,
 })
-SeedBag.Init(screenGui, openShop)
+SeedBag.Init(root, openShop)
 WorldFx.Init()
 PetRenderer.Init()
 
@@ -94,8 +117,10 @@ Net.Notify.OnClientEvent:Connect(Notifications.Show)
 Net.OpenShop.OnClientEvent:Connect(openShop)
 Net.OpenNest.OnClientEvent:Connect(openNests)
 Net.TradeState.OnClientEvent:Connect(function(trade)
+	local wasActive = Store.Trade ~= nil and Store.Trade.Active == true
 	Store.SetTrade(trade)
-	if type(trade) == "table" and trade.Active and not TradeWindow.IsOpen() then
+	-- open the window when a trade starts; after that, hiding it is the player's choice
+	if type(trade) == "table" and trade.Active and not wasActive then
 		show(TradeWindow)
 	end
 end)

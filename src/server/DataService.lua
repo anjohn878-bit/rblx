@@ -91,17 +91,67 @@ local function keyFor(player)
 	return "Player_" .. player.UserId
 end
 
+-- Session locking: while a server has a player's data loaded it stamps the
+-- save with its JobId. Another server waits for the lock to be released (or
+-- to go stale) before loading, and a server that lost the lock stops saving.
+-- Without this, hopping servers right after a trade could duplicate birds.
+local LOCK_STALE_AFTER = 300 -- seconds without a save before a lock is ignored
+local LOCK_WAIT_ATTEMPTS = 6
+local LOCK_WAIT_SECONDS = 5
+
+local jobId = "studio"
+pcall(function()
+	if game.JobId ~= "" then
+		jobId = game.JobId
+	end
+end)
+
+local function lockedByOtherServer(stored)
+	local lock = type(stored) == "table" and stored.Lock
+	return type(lock) == "table" and lock.JobId ~= jobId and os.time() - (tonumber(lock.Time) or 0) < LOCK_STALE_AFTER
+end
+
+-- Reads the save and takes the lock in one step. Returns ok, data, lockedElsewhere.
+local function loadAndLock(key, force)
+	local result, locked
+	local ok, err = pcall(function()
+		store:UpdateAsync(key, function(stored)
+			result, locked = stored, false
+			if not force and lockedByOtherServer(stored) then
+				locked = true
+				return nil -- leave it alone
+			end
+			if type(stored) ~= "table" then
+				return nil -- new player: nothing to lock yet, the first save creates it
+			end
+			stored.Lock = { JobId = jobId, Time = os.time() }
+			return stored
+		end)
+	end)
+	return ok, result, locked, err
+end
+
 function DataService.Load(player)
 	local data, ok, err = nil, store ~= nil, nil
 	if store then
-		for attempt = 1, 3 do
-			ok, err = pcall(function()
-				data = store:GetAsync(keyFor(player))
-			end)
-			if ok then
+		local key = keyFor(player)
+		for attempt = 1, LOCK_WAIT_ATTEMPTS + 1 do
+			local locked
+			ok, data, locked, err = loadAndLock(key, attempt > LOCK_WAIT_ATTEMPTS)
+			if ok and not locked then
 				break
 			end
-			task.wait(attempt)
+			if ok and locked and attempt == 1 then
+				Net.Notify:FireClient(
+					player,
+					"Your garden is still being saved on another server. One moment...",
+					"Info"
+				)
+			end
+			if player.Parent ~= Players then
+				return nil
+			end
+			task.wait(ok and LOCK_WAIT_SECONDS or attempt)
 		end
 	end
 
@@ -139,24 +189,36 @@ function DataService.Get(player)
 	return profile and profile.Data
 end
 
-function DataService.Save(player)
+-- release = true for the final save when the player leaves (frees the lock).
+function DataService.Save(player, release)
 	local profile = profiles[player]
 	if not profile or not profile.CanSave or not store then
 		return false
 	end
+	local lostLock = false
 	local ok, err = pcall(function()
-		store:UpdateAsync(keyFor(player), function()
+		store:UpdateAsync(keyFor(player), function(stored)
+			lostLock = false
+			if lockedByOtherServer(stored) then
+				-- another server took over this player's data; don't overwrite it
+				lostLock = true
+				return nil
+			end
+			profile.Data.Lock = not release and { JobId = jobId, Time = os.time() } or nil
 			return profile.Data
 		end)
 	end)
 	if not ok then
 		warn("[BirdGarden] Failed to save data for", player.Name, err)
+	elseif lostLock then
+		warn("[BirdGarden] Another server owns " .. player.Name .. "'s data now; stopped saving here")
+		profile.CanSave = false
 	end
-	return ok
+	return ok and not lostLock
 end
 
 function DataService.Release(player)
-	DataService.Save(player)
+	DataService.Save(player, true)
 	profiles[player] = nil
 end
 
@@ -168,7 +230,7 @@ end
 function DataService.SaveAll()
 	local threads = {}
 	for player in pairs(profiles) do
-		table.insert(threads, task.spawn(DataService.Save, player))
+		table.insert(threads, task.spawn(DataService.Save, player, true))
 	end
 	-- wait (up to a limit) for the saves to finish
 	local deadline = os.clock() + 20

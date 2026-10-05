@@ -25,6 +25,7 @@ function Notifications.Init(screenGui)
 		Position = UDim2.new(0.5, 0, 0, 8),
 		Size = UDim2.new(0.6, 0, 0, 220),
 		BackgroundTransparency = 1,
+		ZIndex = 30, -- above windows
 		Parent = screenGui,
 	}, {
 		UI.new("UISizeConstraint", { MaxSize = Vector2.new(460, 220) }),

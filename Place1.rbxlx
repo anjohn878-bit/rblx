@@ -1386,43 +1386,43 @@ local Viewport = require(script.Parent.Viewport)
 local AviaryWindow = {}
 
 local BIRD_VIEW = Vector3.new(-0.8, 0.35, -1)
-local CONFIRM_TIME = 3
 
 local window, body, headerInfo, perkLabel, bulkRarityButton
 local cards = {} -- [petId] = card
 local bulkRarity = 1
 local openNests -- set in Init
 
--- A button that needs two presses within a few seconds (for selling).
-local function confirmButton(props, normalText, onConfirm)
-	local armedUntil = 0
-	local button
-	button = UI.button(props, function()
-		if os.clock() < armedUntil then
-			armedUntil = 0
-			button.Text = normalText()
-			onConfirm()
-		else
-			armedUntil = os.clock() + CONFIRM_TIME
-			button.Text = "Sure?"
-			task.delay(CONFIRM_TIME, function()
-				if os.clock() >= armedUntil then
-					button.Text = normalText()
-				end
-			end)
-		end
-	end)
-	button.Text = normalText()
-	return button
-end
-
 local function perkSummary(perks)
 	local parts = {}
 	for _, perkId in ipairs(Pets.PerkOrder) do
-		local info = Pets.Perks[perkId]
-		table.insert(parts, info.Icon .. " +" .. math.floor((perks[perkId] or 0) * 100 + 0.5) .. "%")
+		if (perks[perkId] or 0) > 0 then
+			table.insert(parts, Pets.PerkText(perkId, perks[perkId]))
+		end
 	end
-	return table.concat(parts, "   ")
+	if #parts == 0 then
+		return "Send birds out into your garden: each kind gives a perk!"
+	end
+	return "Your garden: " .. table.concat(parts, "   ")
+end
+
+-- What "Sell spares" would sell right now (same rules as the server).
+local function bulkSellPreview()
+	local data = Store.Data
+	if not data then
+		return 0, 0
+	end
+	local now = Store.Now()
+	local maxRank = Rarities.Rank(Rarities.Order[bulkRarity])
+	local offered = Store.Trade and Store.Trade.Active and Store.Trade.MyPets or {}
+	local count, coins = 0, 0
+	for id, pet in pairs(data.Pets) do
+		local def = Pets.Def(pet)
+		if def and Rarities.Rank(def.Rarity) <= maxRank and Pets.IsSpare(pet, now) and not table.find(offered, id) then
+			count += 1
+			coins += Pets.SellPrice(pet, now, data.Perks)
+		end
+	end
+	return count, coins
 end
 
 local function buildCard(petId)
@@ -1499,7 +1499,7 @@ local function buildCard(petId)
 			Actions.Pet("Favorite", petId, not pet.Favorite)
 		end
 	end)
-	card.Sell = confirmButton({
+	card.Sell, card.SellArmed = UI.confirmButton({
 		Position = UDim2.new(0, 6, 1, -27),
 		Size = UDim2.new(1, -12, 0, 22),
 		BackgroundColor3 = UI.Colors.Gold,
@@ -1567,7 +1567,7 @@ local function updateCard(card, pet, order, now, perks)
 	card.Equip.BackgroundColor3 = pet.Nest and UI.Colors.Grey or (pet.Equipped and UI.Colors.Wood or UI.Colors.Green)
 	card.Favorite.Text = pet.Favorite and "❤" or "♡"
 	card.SellText = "Sell 🪙 " .. Util.FormatNumber(Pets.SellPrice(pet, now, perks))
-	if card.Sell.Text ~= "Sure?" then
+	if not card.SellArmed() then
 		card.Sell.Text = card.SellText
 	end
 	local canSell = not pet.Favorite and not pet.Nest
@@ -1606,7 +1606,7 @@ local function refresh()
 		.. "/"
 		.. Config.MaxEquippedPets
 		.. " out"
-	perkLabel.Text = "Perks from birds that are out:  " .. perkSummary(perks)
+	perkLabel.Text = perkSummary(perks)
 	body.Empty.Visible = #ids == 0
 end
 
@@ -1657,16 +1657,26 @@ function AviaryWindow.Init(screenGui, callbacks)
 	UI.button({
 		Text = "🥚 Breed",
 		BackgroundColor3 = Color3.fromRGB(230, 170, 80),
-		Size = UDim2.new(0.28, -4, 1, 0),
+		Size = UDim2.new(0.22, -4, 1, 0),
 		Parent = bar,
 	}, function()
 		AviaryWindow.Close()
 		openNests(nil)
 	end)
+	UI.button({
+		Name = "BestOut",
+		Text = "⭐ Best out",
+		BackgroundColor3 = UI.Colors.Green,
+		Position = UDim2.new(0.22, 2, 0, 0),
+		Size = UDim2.new(0.24, -4, 1, 0),
+		Parent = bar,
+	}, function()
+		Actions.Pet("EquipBest")
+	end)
 	bulkRarityButton = UI.button({
 		BackgroundColor3 = UI.Colors.Wood,
-		Position = UDim2.new(0.28, 4, 0, 0),
-		Size = UDim2.new(0.38, -8, 1, 0),
+		Position = UDim2.new(0.46, 2, 0, 0),
+		Size = UDim2.new(0.24, -4, 1, 0),
 		Parent = bar,
 	}, function()
 		bulkRarity = bulkRarity % #Rarities.Order + 1
@@ -1675,18 +1685,25 @@ function AviaryWindow.Init(screenGui, callbacks)
 	end)
 	bulkRarityButton.Text = "≤ " .. Rarities.Order[bulkRarity] .. " ▾"
 	bulkRarityButton.TextColor3 = Rarities.Color(Rarities.Order[bulkRarity])
-	confirmButton({
+	UI.confirmButton({
+		Name = "SellSpares",
 		BackgroundColor3 = UI.Colors.Gold,
 		TextColor3 = UI.Colors.Text,
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, 0, 0, 0),
-		Size = UDim2.new(0.34, -4, 1, 0),
+		Size = UDim2.new(0.3, -2, 1, 0),
 		Parent = bar,
 	}, function()
-		-- spares: birds that aren't out, nesting or favorites
+		-- spares: not out, nesting, favorites, shiny, in a family, babies or 4+ stars
 		return "💰 Sell spares"
 	end, function()
 		Actions.Pet("SellBulk", Rarities.Order[bulkRarity])
+	end, function()
+		local count, coins = bulkSellPreview()
+		if count == 0 then
+			return false -- let the server explain there's nothing to sell
+		end
+		return "Sell " .. count .. " for 🪙 " .. Util.FormatNumber(coins) .. "?"
 	end)
 
 	Store.Changed:Connect(function(what)
@@ -1729,6 +1746,7 @@ return AviaryWindow
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared:WaitForChild("Config"))
 local Pets = require(Shared:WaitForChild("Pets"))
 local Util = require(Shared:WaitForChild("Util"))
 local Store = require(script.Parent.Store)
@@ -1803,8 +1821,8 @@ function Hud.Init(screenGui, callbacks)
 
 	local buttons = UI.new("Frame", {
 		Name = "Buttons",
-		AnchorPoint = Vector2.new(0, 0.5),
-		Position = UDim2.new(0, 12, 0.5, 0),
+		-- below the coin and bird counters
+		Position = UDim2.fromOffset(12, 116),
 		Size = UDim2.fromOffset(70, 400),
 		BackgroundTransparency = 1,
 		Parent = root,
@@ -1812,7 +1830,7 @@ function Hud.Init(screenGui, callbacks)
 		UI.new("UIListLayout", {
 			Padding = UDim.new(0, 10),
 			SortOrder = Enum.SortOrder.LayoutOrder,
-			VerticalAlignment = Enum.VerticalAlignment.Center,
+			VerticalAlignment = Enum.VerticalAlignment.Top,
 		}),
 	})
 	sideButton(buttons, 1, "🌱", "Seeds", Color3.fromRGB(95, 180, 80), callbacks.OnSeeds)
@@ -1831,7 +1849,9 @@ function Hud.Init(screenGui, callbacks)
 		end
 		coinLabel.Text = Util.FormatNumber(data.Coins)
 		birdLabel.Text = Pets.CountPets(data.Pets or {})
-			.. " birds  •  "
+			.. "/"
+			.. Config.MaxPets
+			.. "  •  "
 			.. Pets.CountEquipped(data.Pets or {})
 			.. " out"
 		if lastCoins and data.Coins ~= lastCoins then
@@ -1862,6 +1882,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local BirdBuilder = require(Shared.BirdBuilder)
 local Birds = require(Shared.Birds)
+local Pets = require(Shared.Pets)
 local Rarities = require(Shared.Rarities)
 local Seeds = require(Shared.Seeds)
 local Util = require(Shared.Util)
@@ -1942,8 +1963,15 @@ local function buildCard(bird)
 		Size = UDim2.new(1, -12, 0, 22),
 		Parent = card,
 	})
+	local perk = Pets.Perks[bird.Perk]
 	UI.label({
-		Text = bird.Rarity .. "  •  🪙 " .. Util.FormatNumber(bird.Reward),
+		Text = bird.Rarity
+			.. "  •  🪙 "
+			.. Util.FormatNumber(bird.Reward)
+			.. "  •  "
+			.. perk.Icon
+			.. " "
+			.. perk.Name,
 		TextColor3 = UI.Colors.SubText,
 		Position = UDim2.fromOffset(6, 132),
 		Size = UDim2.new(1, -12, 0, 16),
@@ -2050,11 +2078,34 @@ screenGui.ResetOnSpawn = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = player:WaitForChild("PlayerGui")
 
-Notifications.Init(screenGui)
-ShopWindow.Init(screenGui)
-JournalWindow.Init(screenGui)
-TradeWindow.Init(screenGui)
-NestWindow.Init(screenGui)
+-- Everything is laid out for screens at least 560px tall; on smaller screens
+-- (phones) the whole interface is scaled down to fit.
+local DESIGN_HEIGHT = 560
+local root = Instance.new("Frame")
+root.Name = "Root"
+root.BackgroundTransparency = 1
+root.Parent = screenGui
+local rootScale = Instance.new("UIScale")
+rootScale.Parent = root
+local function fitToScreen()
+	-- (pcall: the offline test harness has no layout engine)
+	local ok, size = pcall(function()
+		return screenGui.AbsoluteSize
+	end)
+	local height = ok and size.Y or 0
+	local scale = height > 0 and math.clamp(height / DESIGN_HEIGHT, 0.6, 1) or 1
+	rootScale.Scale = scale
+	-- the frame is scaled down, so make it bigger to still cover the screen
+	root.Size = UDim2.fromScale(1 / scale, 1 / scale)
+end
+fitToScreen()
+screenGui:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitToScreen)
+
+Notifications.Init(root)
+ShopWindow.Init(root)
+JournalWindow.Init(root)
+TradeWindow.Init(root)
+NestWindow.Init(root)
 
 local windows = { ShopWindow, JournalWindow, AviaryWindow, NestWindow, TradeWindow }
 
@@ -2084,9 +2135,9 @@ local function openNests(nestIndex)
 	show(NestWindow, nestIndex)
 end
 
-AviaryWindow.Init(screenGui, { OpenNests = openNests })
+AviaryWindow.Init(root, { OpenNests = openNests })
 
-Hud.Init(screenGui, {
+Hud.Init(root, {
 	OnSeeds = function()
 		toggle(ShopWindow)
 	end,
@@ -2103,7 +2154,7 @@ Hud.Init(screenGui, {
 		toggle(TradeWindow)
 	end,
 })
-SeedBag.Init(screenGui, openShop)
+SeedBag.Init(root, openShop)
 WorldFx.Init()
 PetRenderer.Init()
 
@@ -2113,8 +2164,10 @@ Net.Notify.OnClientEvent:Connect(Notifications.Show)
 Net.OpenShop.OnClientEvent:Connect(openShop)
 Net.OpenNest.OnClientEvent:Connect(openNests)
 Net.TradeState.OnClientEvent:Connect(function(trade)
+	local wasActive = Store.Trade ~= nil and Store.Trade.Active == true
 	Store.SetTrade(trade)
-	if type(trade) == "table" and trade.Active and not TradeWindow.IsOpen() then
+	-- open the window when a trade starts; after that, hiding it is the player's choice
+	if type(trade) == "table" and trade.Active and not wasActive then
 		show(TradeWindow)
 	end
 end)
@@ -2407,15 +2460,19 @@ function NestWindow.Init(screenGui)
 			Size = UDim2.new(1, -110, 1, -8),
 			Parent = row,
 		})
-		local cancel = UI.button({
-			Text = "Cancel",
+		-- cancelling throws the egg away, so it needs a second tap
+		local cancel = UI.confirmButton({
 			BackgroundColor3 = UI.Colors.Red,
 			AnchorPoint = Vector2.new(1, 0.5),
 			Position = UDim2.new(1, -6, 0.5, 0),
 			Size = UDim2.fromOffset(90, 30),
 			Parent = row,
 		}, function()
+			return "Cancel"
+		end, function()
 			Actions.Pet("CancelNest", index)
+		end, function()
+			return "Lose egg?"
 		end)
 		nestRows[index] = { Label = label, Cancel = cancel }
 	end
@@ -2534,6 +2591,7 @@ function Notifications.Init(screenGui)
 		Position = UDim2.new(0.5, 0, 0, 8),
 		Size = UDim2.new(0.6, 0, 0, 220),
 		BackgroundTransparency = 1,
+		ZIndex = 30, -- above windows
 		Parent = screenGui,
 	}, {
 		UI.new("UISizeConstraint", { MaxSize = Vector2.new(460, 220) }),
@@ -2748,6 +2806,14 @@ local function addNameTag(model, marker)
 	gui.Parent = model.PrimaryPart
 end
 
+local function placeModel(state, heightOffset)
+	local body = state.Model and state.Model.PrimaryPart
+	if body then
+		local position = state.Position + Vector3.new(0, state.StandHeight + (heightOffset or 0), 0)
+		body.CFrame = CFrame.new(position) * CFrame.Angles(0, state.Yaw, 0)
+	end
+end
+
 local function buildModel(state)
 	if state.Model then
 		state.Model:Destroy()
@@ -2774,8 +2840,12 @@ local function buildModel(state)
 		tostring(marker:GetAttribute("Stars")),
 		tostring(marker:GetAttribute("DisplayName")),
 	}, "|")
-	model.Parent = container
 	model:AddTag("BirdGardenBird")
+	-- only show it once we know where it is (its garden may not have streamed in yet)
+	if state.Position then
+		placeModel(state)
+		model.Parent = container
+	end
 end
 
 ------------------------------------------------------------------------------
@@ -2838,14 +2908,6 @@ local function chooseNext(state, now)
 	startIdle(state, now)
 end
 
-local function placeModel(state, heightOffset)
-	local body = state.Model and state.Model.PrimaryPart
-	if body then
-		local position = state.Position + Vector3.new(0, state.StandHeight + (heightOffset or 0), 0)
-		body.CFrame = CFrame.new(position) * CFrame.Angles(0, state.Yaw, 0)
-	end
-end
-
 local function faceToward(state, direction, dt)
 	if direction.Magnitude > 0.05 then
 		state.Yaw = lerpAngle(state.Yaw, yawToward(direction), math.min(1, dt * TURN_SPEED))
@@ -2857,6 +2919,9 @@ local function updatePet(state, dt, now)
 	if not state.Plot or not state.Plot.Parent then
 		state.Plot = plotFor(marker:GetAttribute("PlotId"))
 		if not state.Plot then
+			if state.Model then
+				state.Model.Parent = nil
+			end
 			return
 		end
 	end
@@ -2867,6 +2932,8 @@ local function updatePet(state, dt, now)
 			local landing = randomPoint(state.Plot)
 			if landing then
 				startFlight(state, landing, false)
+			else
+				startIdle(state, now)
 			end
 		else
 			state.Position = randomPoint(state.Plot)
@@ -2879,6 +2946,10 @@ local function updatePet(state, dt, now)
 	local model = state.Model
 	if not model then
 		return
+	end
+	if model.Parent ~= container then
+		placeModel(state)
+		model.Parent = container
 	end
 
 	if marker:GetAttribute("Mode") == "Nest" then
@@ -2946,6 +3017,9 @@ local function updatePet(state, dt, now)
 				startIdle(state, now)
 			end
 		end
+	else
+		-- never get stuck without something to do
+		startIdle(state, now)
 	end
 	if state.Hover then
 		hoverHeight += 1.2 + math.sin(now * 3) * 0.15
@@ -3756,8 +3830,27 @@ local function refreshTrade(trade)
 	if not myCoinsBox:IsFocused() then
 		myCoinsBox.Text = tostring(trade.MyCoins)
 	end
-	myCoinsHint.Text = "You have 🪙 " .. Util.FormatNumber(data and data.Coins or 0)
-	theirCoins.Text = "🪙 " .. Util.FormatNumber(trade.TheirCoins) .. " coins"
+	-- show what each side is worth so lopsided trades are easy to spot
+	local myTotal = trade.MyCoins
+	for _, petId in ipairs(trade.MyPets) do
+		local pet = myPets[petId]
+		if pet then
+			myTotal += Pets.BaseValue(pet, now)
+		end
+	end
+	local theirTotal = trade.TheirCoins
+	for _, summary in ipairs(trade.TheirPets) do
+		theirTotal += summary.Value or 0
+	end
+	myCoinsHint.Text = "Worth 🪙 "
+		.. Util.FormatNumber(myTotal)
+		.. " (you have "
+		.. Util.FormatNumber(data and data.Coins or 0)
+		.. ")"
+	theirCoins.Text = "🪙 "
+		.. Util.FormatNumber(trade.TheirCoins)
+		.. " coins  •  worth 🪙 "
+		.. Util.FormatNumber(theirTotal)
 
 	clearRows(myOfferList)
 	if #trade.MyPets == 0 then
@@ -3770,7 +3863,7 @@ local function refreshTrade(trade)
 			row(
 				myOfferList,
 				order,
-				petLine(pet.Name, pet.Species, pet.Stars, pet.Shiny, Pets.IsBaby(pet, now)),
+				petLine(pet.Name, pet.Species, pet.Stars, pet.Shiny, Pets.IsBaby(pet, now), Pets.BaseValue(pet, now)),
 				Rarities.Color(def.Rarity),
 				"Remove",
 				UI.Colors.Red,
@@ -3790,7 +3883,7 @@ local function refreshTrade(trade)
 			row(
 				addList,
 				order,
-				petLine(pet.Name, pet.Species, pet.Stars, pet.Shiny, Pets.IsBaby(pet, now)),
+				petLine(pet.Name, pet.Species, pet.Stars, pet.Shiny, Pets.IsBaby(pet, now), Pets.BaseValue(pet, now)),
 				Rarities.Color(Pets.Def(pet).Rarity),
 				"Add",
 				UI.Colors.Green,
@@ -3845,10 +3938,6 @@ end
 local function refresh()
 	local trade = Store.Trade
 	local active = trade ~= nil and trade.Active
-	if active and not wasActive then
-		-- a trade just started: show it
-		window.Visible = true
-	end
 	wasActive = active
 	lobby.Visible = not active
 	tradeFrame.Visible = active
@@ -3895,6 +3984,7 @@ local function buildPopup(screenGui)
 		Size = UDim2.fromOffset(340, 96),
 		BackgroundColor3 = UI.Colors.Panel,
 		Visible = false,
+		ZIndex = 20, -- above any open window
 		Parent = screenGui,
 	}, { UI.corner(14), UI.stroke(UI.Colors.Wood, 3) })
 	popupLabel = UI.label({
@@ -3994,17 +4084,17 @@ function TradeWindow.Init(screenGui)
 		Size = UDim2.new(0.55, -6, 0, 18),
 		Parent = left,
 	})
-	myOfferList = scrollList(left, UDim2.fromOffset(0, 56), UDim2.new(1, 0, 0.42, -56))
+	myOfferList = scrollList(left, UDim2.fromOffset(0, 56), UDim2.new(1, 0, 0.5, -56))
 	UI.label({
 		Text = "Add a bird (up to " .. Config.TradeMaxPets .. ")",
 		Font = UI.TitleFont,
 		TextColor3 = UI.Colors.Wood,
 		TextXAlignment = Enum.TextXAlignment.Left,
-		Position = UDim2.new(0, 0, 0.42, 4),
+		Position = UDim2.new(0, 0, 0.5, 4),
 		Size = UDim2.new(1, 0, 0, 20),
 		Parent = left,
 	})
-	addList = scrollList(left, UDim2.new(0, 0, 0.42, 26), UDim2.new(1, 0, 0.58, -26))
+	addList = scrollList(left, UDim2.new(0, 0, 0.5, 26), UDim2.new(1, 0, 0.5, -26))
 
 	-- right: their side
 	local right = UI.new("Frame", {
@@ -4058,7 +4148,8 @@ function TradeWindow.Init(screenGui)
 	}, function()
 		local trade = Store.Trade
 		if trade and trade.Active then
-			Net.TradeUpdate:FireServer(trade.MyReady and "Unready" or "Ready")
+			-- Ready is tied to the version of the offer on screen
+			Net.TradeUpdate:FireServer(trade.MyReady and "Unready" or "Ready", trade.Revision)
 		end
 	end)
 	UI.button({
@@ -4235,6 +4326,43 @@ function UI.button(props, onClick)
 		button.Activated:Connect(onClick)
 	end
 	return button
+end
+
+-- A button that needs two presses within a few seconds (for things that can't
+-- be undone). getText() gives its normal label and getConfirmText() the "are
+-- you sure?" label (return false to skip confirming).
+-- Returns the button and a function telling whether it's waiting for the
+-- second press (so refreshes don't overwrite the question).
+function UI.confirmButton(props, getText, onConfirm, getConfirmText)
+	local armedUntil = 0
+	local button
+	button = UI.button(props, function()
+		if os.clock() < armedUntil then
+			armedUntil = 0
+			button.Text = getText()
+			onConfirm()
+			return
+		end
+		local confirmText = "Sure?"
+		if getConfirmText then
+			confirmText = getConfirmText()
+		end
+		if not confirmText then
+			onConfirm()
+			return
+		end
+		armedUntil = os.clock() + 3
+		button.Text = confirmText
+		task.delay(3, function()
+			if os.clock() >= armedUntil then
+				button.Text = getText()
+			end
+		end)
+	end)
+	button.Text = getText()
+	return button, function()
+		return os.clock() < armedUntil
+	end
 end
 
 -- A pop animation used when numbers change.
@@ -5731,7 +5859,7 @@ Pets.Perks = {
 		Icon = "🎒",
 		Name = "Seed Finder",
 		Description = "chance each minute to find a seed",
-		PerPoint = 0.04,
+		PerPoint = 0.07,
 		Max = 0.9,
 	},
 }
@@ -5847,6 +5975,18 @@ function Pets.BaseValue(pet, now)
 		value *= BABY_VALUE
 	end
 	return math.max(1, math.floor(value))
+end
+
+-- Spares are the birds "Sell spares" may sell. Anything special is kept:
+-- birds that are out, nesting, favorites, shiny, in a family, babies or 4+ stars.
+function Pets.IsSpare(pet, now)
+	return not pet.Equipped
+		and not pet.Nest
+		and not pet.Favorite
+		and not pet.Shiny
+		and not pet.Family
+		and not Pets.IsBaby(pet, now)
+		and (pet.Stars or 1) < 4
 end
 
 function Pets.SellPrice(pet, now, perks)
@@ -6969,7 +7109,19 @@ local function befriend(bird, player)
 		return
 	end
 	local def = bird.Def
-	local pet, petId, coins, firstTime = PetService.Befriend(player, def, bird.Shiny)
+	local pet, petId, coins, firstTime, refusal, replaced = PetService.Befriend(player, def, bird.Shiny)
+	if refusal == "Full" then
+		-- special birds wait on their perch while the player makes room
+		Net.Notify:FireClient(
+			player,
+			"🐦 Your aviary is full! Sell spares or trade in 🐦 Birds to make room for this "
+				.. (bird.Shiny and "✨ Shiny " or "")
+				.. def.Name
+				.. ".",
+			"Error"
+		)
+		return
+	end
 	if not pet then
 		return
 	end
@@ -7000,9 +7152,20 @@ local function befriend(bird, player)
 		Net.Effect:FireClient(
 			player,
 			position + Vector3.new(0, 2, 0),
-			pet.Name .. " " .. Pets.StarText(pet.Stars),
+			pet.Name
+				.. " "
+				.. Pets.StarText(pet.Stars)
+				.. "  •  worth 🪙 "
+				.. Util.FormatNumber(Pets.BaseValue(pet, Util.Now())),
 			bird.Shiny and Color3.fromRGB(255, 230, 120) or Rarities.Color(def.Rarity)
 		)
+		if replaced then
+			Net.Notify:FireClient(
+				player,
+				"🔁 " .. pet.Name .. " the " .. def.Name .. " took " .. replaced.Name .. "'s spot in your garden.",
+				"Info"
+			)
+		end
 		if bird.Shiny or Rarities.Rank(def.Rarity) >= Rarities.Rank("Rare") or pet.Stars >= 3 then
 			Net.Notify:FireClient(
 				player,
@@ -7015,6 +7178,12 @@ local function befriend(bird, player)
 			local marker = PetService.FindMarker(player, petId)
 			if marker then
 				marker:SetAttribute("SpawnAt", position)
+				-- only clients drawing it right now need the starting spot
+				task.delay(3, function()
+					if marker.Parent then
+						marker:SetAttribute("SpawnAt", nil)
+					end
+				end)
 			end
 			bird.Gone = true
 			local state = bird.State
@@ -7026,6 +7195,12 @@ local function befriend(bird, player)
 			model:Destroy()
 		else
 			-- no room to roam: it flies off to the aviary
+			Net.Effect:FireClient(
+				player,
+				position + Vector3.new(0, 3.2, 0),
+				"🏠 Off to your aviary",
+				Color3.fromRGB(200, 230, 255)
+			)
 			task.delay(0.3, flyAway, bird)
 		end
 	else
@@ -7292,17 +7467,67 @@ local function keyFor(player)
 	return "Player_" .. player.UserId
 end
 
+-- Session locking: while a server has a player's data loaded it stamps the
+-- save with its JobId. Another server waits for the lock to be released (or
+-- to go stale) before loading, and a server that lost the lock stops saving.
+-- Without this, hopping servers right after a trade could duplicate birds.
+local LOCK_STALE_AFTER = 300 -- seconds without a save before a lock is ignored
+local LOCK_WAIT_ATTEMPTS = 6
+local LOCK_WAIT_SECONDS = 5
+
+local jobId = "studio"
+pcall(function()
+	if game.JobId ~= "" then
+		jobId = game.JobId
+	end
+end)
+
+local function lockedByOtherServer(stored)
+	local lock = type(stored) == "table" and stored.Lock
+	return type(lock) == "table" and lock.JobId ~= jobId and os.time() - (tonumber(lock.Time) or 0) < LOCK_STALE_AFTER
+end
+
+-- Reads the save and takes the lock in one step. Returns ok, data, lockedElsewhere.
+local function loadAndLock(key, force)
+	local result, locked
+	local ok, err = pcall(function()
+		store:UpdateAsync(key, function(stored)
+			result, locked = stored, false
+			if not force and lockedByOtherServer(stored) then
+				locked = true
+				return nil -- leave it alone
+			end
+			if type(stored) ~= "table" then
+				return nil -- new player: nothing to lock yet, the first save creates it
+			end
+			stored.Lock = { JobId = jobId, Time = os.time() }
+			return stored
+		end)
+	end)
+	return ok, result, locked, err
+end
+
 function DataService.Load(player)
 	local data, ok, err = nil, store ~= nil, nil
 	if store then
-		for attempt = 1, 3 do
-			ok, err = pcall(function()
-				data = store:GetAsync(keyFor(player))
-			end)
-			if ok then
+		local key = keyFor(player)
+		for attempt = 1, LOCK_WAIT_ATTEMPTS + 1 do
+			local locked
+			ok, data, locked, err = loadAndLock(key, attempt > LOCK_WAIT_ATTEMPTS)
+			if ok and not locked then
 				break
 			end
-			task.wait(attempt)
+			if ok and locked and attempt == 1 then
+				Net.Notify:FireClient(
+					player,
+					"Your garden is still being saved on another server. One moment...",
+					"Info"
+				)
+			end
+			if player.Parent ~= Players then
+				return nil
+			end
+			task.wait(ok and LOCK_WAIT_SECONDS or attempt)
 		end
 	end
 
@@ -7340,24 +7565,36 @@ function DataService.Get(player)
 	return profile and profile.Data
 end
 
-function DataService.Save(player)
+-- release = true for the final save when the player leaves (frees the lock).
+function DataService.Save(player, release)
 	local profile = profiles[player]
 	if not profile or not profile.CanSave or not store then
 		return false
 	end
+	local lostLock = false
 	local ok, err = pcall(function()
-		store:UpdateAsync(keyFor(player), function()
+		store:UpdateAsync(keyFor(player), function(stored)
+			lostLock = false
+			if lockedByOtherServer(stored) then
+				-- another server took over this player's data; don't overwrite it
+				lostLock = true
+				return nil
+			end
+			profile.Data.Lock = not release and { JobId = jobId, Time = os.time() } or nil
 			return profile.Data
 		end)
 	end)
 	if not ok then
 		warn("[BirdGarden] Failed to save data for", player.Name, err)
+	elseif lostLock then
+		warn("[BirdGarden] Another server owns " .. player.Name .. "'s data now; stopped saving here")
+		profile.CanSave = false
 	end
-	return ok
+	return ok and not lostLock
 end
 
 function DataService.Release(player)
-	DataService.Save(player)
+	DataService.Save(player, true)
 	profiles[player] = nil
 end
 
@@ -7369,7 +7606,7 @@ end
 function DataService.SaveAll()
 	local threads = {}
 	for player in pairs(profiles) do
-		table.insert(threads, task.spawn(DataService.Save, player))
+		table.insert(threads, task.spawn(DataService.Save, player, true))
 	end
 	-- wait (up to a limit) for the saves to finish
 	local deadline = os.clock() + 20
@@ -7545,7 +7782,7 @@ local function onPlayerAdded(player)
 	Net.ShopUpdated:FireClient(player, ShopService.Snapshot(player))
 	Net.Notify:FireClient(
 		player,
-		"Welcome to your Bird Garden! Plant seeds and wait for birds to visit. 🐦",
+		"Welcome to your Bird Garden! Plant seeds, befriend the birds that visit, and sell spares for coins. 🐦",
 		"Success"
 	)
 end
@@ -7619,6 +7856,8 @@ Net.PetAction.OnServerInvoke = function(player, action, a, b, c)
 		return PetService.SetFavorite(player, a, b == true)
 	elseif action == "Sell" then
 		return PetService.Sell(player, a)
+	elseif action == "EquipBest" then
+		return PetService.EquipBest(player)
 	elseif action == "SellBulk" then
 		return PetService.SellBulk(player, a)
 	elseif action == "Breed" then
@@ -7977,6 +8216,7 @@ local function hatch(player, data, key, entry, now)
 				"Error"
 			)
 			NestService.UpdateVisuals(player)
+			DataService.Push(player)
 		end
 		return false
 	end
@@ -7984,7 +8224,7 @@ local function hatch(player, data, key, entry, now)
 	local newFamily = false
 	local family = a.Family or b.Family
 	if not family then
-		family = PetService.RandomFamilyName()
+		family = PetService.NewFamilyName(data)
 		newFamily = true
 	end
 	a.Family = a.Family or family
@@ -8113,8 +8353,33 @@ local function randomName()
 	return Pets.FirstNames[rng:NextInteger(1, #Pets.FirstNames)]
 end
 
-function PetService.RandomFamilyName()
-	return Pets.FamilyNames[rng:NextInteger(1, #Pets.FamilyNames)]
+local NUMERALS = { "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X" }
+
+-- A surname nobody in this aviary uses yet, so families never get mixed up.
+function PetService.NewFamilyName(data)
+	local used = {}
+	for _, pet in pairs(data.Pets) do
+		if pet.Family then
+			used[pet.Family] = true
+		end
+	end
+	local free = {}
+	for _, name in ipairs(Pets.FamilyNames) do
+		if not used[name] then
+			table.insert(free, name)
+		end
+	end
+	if #free > 0 then
+		return free[rng:NextInteger(1, #free)]
+	end
+	local base = Pets.FamilyNames[rng:NextInteger(1, #Pets.FamilyNames)]
+	for n = 2, 1000 do
+		local name = base .. " " .. (NUMERALS[n - 1] or tostring(n))
+		if not used[name] then
+			return name
+		end
+	end
+	return base
 end
 
 local function rollWildStars()
@@ -8156,7 +8421,10 @@ function PetService.GetPerks(player)
 	if not perks then
 		local data = DataService.Get(player)
 		perks = Pets.ComputePerks(data and data.Pets or {}, Util.Now())
-		perkCache[player] = perks
+		-- only remember real perks (not the empty ones from before the save loads)
+		if data then
+			perkCache[player] = perks
+		end
 	end
 	return perks
 end
@@ -8179,6 +8447,7 @@ local function findRoamingParent(player, data, pet)
 			if
 				other ~= pet
 				and other.Family == pet.Family
+				and other.Species == pet.Species
 				and other.Equipped
 				and not other.Nest
 				and not other.GrowsUpAt
@@ -8263,8 +8532,23 @@ end
 ------------------------------------------------------------------------------
 -- Catching
 
--- A befriended bird joins the aviary. Returns pet, petId (nil if the aviary
--- was full and it was sold instead), coins earned, first time seen.
+-- The weakest roaming bird that could make way for a better one.
+local function weakestOut(data, now)
+	local weakestId, weakestPoints
+	for id, pet in pairs(data.Pets) do
+		if pet.Equipped and not pet.Nest and not pet.Favorite and not Pets.IsBaby(pet, now) then
+			local points = Pets.Points(pet, now)
+			if not weakestPoints or points < weakestPoints then
+				weakestId, weakestPoints = id, points
+			end
+		end
+	end
+	return weakestId, weakestPoints
+end
+
+-- A befriended bird joins the aviary.
+-- Returns pet, petId, coins earned, first time seen, refusal ("Full"), and the
+-- pet it replaced in the garden (if it was better than one that was out).
 function PetService.Befriend(player, def, shiny)
 	local data = DataService.Get(player)
 	if not data then
@@ -8273,8 +8557,15 @@ function PetService.Befriend(player, def, shiny)
 	local now = Util.Now()
 	local perks = PetService.GetPerks(player)
 	local pet = PetService.NewPet({ Species = def.Id, Shiny = shiny, Stars = rollWildStars() })
-
 	local firstTime = (data.Journal[def.Id] or 0) == 0
+	local count = Pets.CountPets(data.Pets)
+	local full = count >= Config.MaxPets
+
+	-- never throw away anything special just because the aviary is full
+	if full and (shiny or firstTime or pet.Stars >= 3 or Rarities.Rank(def.Rarity) >= Rarities.Rank("Rare")) then
+		return nil, nil, 0, false, "Full"
+	end
+
 	data.Journal[def.Id] = (data.Journal[def.Id] or 0) + 1
 	if shiny then
 		data.ShinyJournal[def.Id] = (data.ShinyJournal[def.Id] or 0) + 1
@@ -8285,18 +8576,48 @@ function PetService.Befriend(player, def, shiny)
 	if firstTime then
 		coins += math.floor(Pets.BaseValue(pet, now) * Config.DiscoveryBonusMultiplier * (1 + perks.Coins))
 	end
-	local id
-	if Pets.CountPets(data.Pets) >= Config.MaxPets then
+	local id, replaced
+	if full then
+		-- a plain bird and no room: it's sold straight away
 		coins += Pets.SellPrice(pet, now, perks)
 	else
 		id = PetService.AddPet(data, pet)
 		if Pets.CountEquipped(data.Pets) < Config.MaxEquippedPets then
 			pet.Equipped = true
+		else
+			-- better than one of the birds that's out? swap them
+			local weakestId, weakestPoints = weakestOut(data, now)
+			if weakestId and Pets.Points(pet, now) > weakestPoints then
+				replaced = data.Pets[weakestId]
+				replaced.Equipped = false
+				pet.Equipped = true
+			end
+		end
+		if count + 1 == Config.MaxPets - 5 then
+			Net.Notify:FireClient(
+				player,
+				"Your aviary is almost full ("
+					.. count + 1
+					.. "/"
+					.. Config.MaxPets
+					.. "). Sell spares in 🐦 Birds to make room.",
+				"Info"
+			)
 		end
 	end
 	data.Coins += coins
 	PetService.Refresh(player)
-	return pet, id, coins, firstTime
+
+	if data.TotalBefriended == 1 then
+		task.delay(3, function()
+			Net.Notify:FireClient(
+				player,
+				"💡 Your birds live in the 🐦 Birds aviary. Send the best ones out to help your garden, and sell spares for coins!",
+				"Success"
+			)
+		end)
+	end
+	return pet, id, coins, firstTime, nil, replaced
 end
 
 ------------------------------------------------------------------------------
@@ -8381,7 +8702,37 @@ function PetService.Sell(player, petId)
 	return true, "Sold " .. Pets.DisplayName(pet) .. " for " .. Util.FormatNumber(price) .. " coins."
 end
 
--- Sells every bird at or below a rarity that isn't out, nesting, a favorite or in a trade.
+-- Sends out the strongest birds (by perk points).
+function PetService.EquipBest(player)
+	local data = DataService.Get(player)
+	if not data then
+		return false, "Your garden is still loading..."
+	end
+	local now = Util.Now()
+	local ids = {}
+	for id, pet in pairs(data.Pets) do
+		if not pet.Nest then
+			table.insert(ids, id)
+		end
+	end
+	if #ids == 0 then
+		return false, "You don't have any birds to send out yet."
+	end
+	table.sort(ids, function(a, b)
+		local pa, pb = Pets.Points(data.Pets[a], now), Pets.Points(data.Pets[b], now)
+		if pa ~= pb then
+			return pa > pb
+		end
+		return a < b
+	end)
+	for index, id in ipairs(ids) do
+		data.Pets[id].Equipped = index <= Config.MaxEquippedPets
+	end
+	PetService.Refresh(player)
+	return true, "Your best birds are out in the garden!"
+end
+
+-- Sells every spare bird (see Pets.IsSpare) at or below a rarity.
 function PetService.SellBulk(player, maxRarity)
 	local data = DataService.Get(player)
 	local maxRank = Rarities.Rank(maxRarity)
@@ -8393,14 +8744,20 @@ function PetService.SellBulk(player, maxRarity)
 	local sold, coins = 0, 0
 	for id, pet in pairs(data.Pets) do
 		local def = Pets.Def(pet)
-		if def and Rarities.Rank(def.Rarity) <= maxRank and not pet.Equipped and not sellBlocker(player, pet, id) then
+		if
+			def
+			and Rarities.Rank(def.Rarity) <= maxRank
+			and Pets.IsSpare(pet, now)
+			and not PetService.IsInTrade(player, id)
+		then
 			coins += Pets.SellPrice(pet, now, perks)
 			sold += 1
 			data.Pets[id] = nil
 		end
 	end
 	if sold == 0 then
-		return false, "No birds to sell. Birds that are out, nesting or favorites are kept."
+		return false,
+			"No spares to sell. Birds that are out, nesting, favorites, shiny, in a family, babies or 4⭐+ are kept."
 	end
 	data.Coins += coins
 	PetService.Refresh(player)
@@ -8430,11 +8787,16 @@ function PetService.PlayerLeft(player)
 	nextSeedRoll[player] = nil
 end
 
-local function pickFoundSeed(luck)
+-- A bird finds seeds up to one rarity above its own; cheaper seeds are more
+-- common, and the Lucky perk tilts it toward rarer ones.
+local function pickFoundSeed(finderRank, luck)
 	local weights = {}
 	for _, seed in ipairs(Seeds.List) do
 		local rank = Rarities.Rank(seed.Rarity)
-		table.insert(weights, { Seed = seed, Weight = seed.Stock.Chance * (1 + luck * (rank - 1)) })
+		if rank <= finderRank + 1 then
+			local weight = seed.Stock.Chance / math.sqrt(seed.Price) * (1 + luck * (rank - 1))
+			table.insert(weights, { Seed = seed, Weight = weight })
+		end
 	end
 	return Util.WeightedPick(weights, rng).Seed
 end
@@ -8462,7 +8824,7 @@ local function rollSeedFinder(player, data, now)
 	if not finder then
 		return
 	end
-	local seed = pickFoundSeed(perks.Luck)
+	local seed = pickFoundSeed(Rarities.Rank(Pets.Def(finder.Pet).Rarity), perks.Luck)
 	data.Seeds[seed.Id] = (data.Seeds[seed.Id] or 0) + 1
 	DataService.EnsureSelection(player)
 	PetService.SeedsChanged(player)
@@ -9098,7 +9460,7 @@ function ShopService.Buy(player, seedId)
 	end
 	local data = profile.Data
 	if data.Coins < seed.Price then
-		return false, "Not enough coins! Befriend more birds to earn coins."
+		return false, "Not enough coins! Sell spare birds in 🐦 Birds to get coins."
 	end
 
 	data.Coins -= seed.Price
@@ -9151,6 +9513,20 @@ local function partnerOf(session, player)
 	return session.Players[1] == player and session.Players[2] or session.Players[1]
 end
 
+-- Trading is only fair if both saves will stick (one side failing to load
+-- would make the other side's birds vanish).
+local function savingProblem(a, b)
+	local pa, pb = DataService.GetProfile(a), DataService.GetProfile(b)
+	if not pa or not pb then
+		return "That player is still loading."
+	end
+	if pa.CanSave ~= pb.CanSave then
+		local who = pa.CanSave and b or a
+		return "Trading is paused: " .. who.DisplayName .. "'s progress can't be saved right now."
+	end
+	return nil
+end
+
 local function stateFor(session, player)
 	local other = partnerOf(session, player)
 	local mine, theirs = session.Offers[player], session.Offers[other]
@@ -9173,6 +9549,7 @@ local function stateFor(session, player)
 		MyReady = session.Ready[player] == true,
 		TheirReady = session.Ready[other] == true,
 		ExecuteAt = session.ExecuteAt,
+		Revision = session.Revision,
 		ServerNow = Util.Now(),
 	}
 end
@@ -9196,9 +9573,12 @@ local function endSession(session, reason, completed)
 	end
 end
 
+-- Any change to an offer bumps the revision and un-readies both players. A
+-- "Ready" only counts for the revision the player was looking at.
 local function unready(session)
 	session.Ready = {}
 	session.ExecuteAt = nil
+	session.Revision += 1
 end
 
 local function isEmpty(session)
@@ -9222,8 +9602,9 @@ function TradeService.Request(player, targetUserId)
 	if not target or target == player then
 		return
 	end
-	if not DataService.Get(player) or not DataService.Get(target) then
-		Net.Notify:FireClient(player, "That player is still loading.", "Error")
+	local problem = savingProblem(player, target)
+	if problem then
+		Net.Notify:FireClient(player, problem, "Error")
 		return
 	end
 	if sessions[player] then
@@ -9272,7 +9653,10 @@ function TradeService.Respond(player, fromUserId, accept)
 		Net.Notify:FireClient(player, "One of you is already trading.", "Error")
 		return
 	end
-	if not DataService.Get(player) or not DataService.Get(from) then
+	local problem = savingProblem(player, from)
+	if problem then
+		Net.Notify:FireClient(player, problem, "Error")
+		Net.Notify:FireClient(from, problem, "Error")
 		return
 	end
 	local session = {
@@ -9282,6 +9666,8 @@ function TradeService.Respond(player, fromUserId, accept)
 			[player] = { Pets = {}, Coins = 0 },
 		},
 		Ready = {},
+		Revision = 1,
+		Sent = {},
 	}
 	sessions[from] = session
 	sessions[player] = session
@@ -9336,6 +9722,11 @@ function TradeService.Update(player, action, value)
 		offer.Coins = coins
 		unready(session)
 	elseif action == "Ready" then
+		if value ~= session.Revision then
+			-- the offer changed after this player looked at it
+			sendState(session)
+			return
+		end
 		if isEmpty(session) then
 			Net.Notify:FireClient(player, "Add a bird or some coins to the trade first.", "Error")
 			return
@@ -9383,7 +9774,7 @@ local function execute(session)
 	local dataA, dataB = DataService.Get(a), DataService.Get(b)
 	local offerA, offerB = session.Offers[a], session.Offers[b]
 
-	local problem = problemWith(a, dataA, offerA) or problemWith(b, dataB, offerB)
+	local problem = problemWith(a, dataA, offerA) or problemWith(b, dataB, offerB) or savingProblem(a, b)
 	if not problem then
 		if Pets.CountPets(dataA.Pets) - #offerA.Pets + #offerB.Pets > Config.MaxPets then
 			problem = a.DisplayName .. "'s aviary doesn't have room."
@@ -9469,8 +9860,21 @@ function TradeService.Revalidate(player)
 	end
 	if changed then
 		unready(session)
+		sendState(session)
+		return
 	end
-	sendState(session)
+	-- an offered bird may have changed (a baby grew up): only then resend
+	local summary = {}
+	for _, id in ipairs(offer.Pets) do
+		local pet = data.Pets[id]
+		local info = PetService.Summary(pet, id)
+		table.insert(summary, info.Name .. tostring(info.Baby) .. info.Stars .. info.Value)
+	end
+	local signature = table.concat(summary, "|")
+	if session.Sent[player] ~= signature then
+		session.Sent[player] = signature
+		sendState(session)
+	end
 end
 
 function TradeService.PlayerLeft(player)

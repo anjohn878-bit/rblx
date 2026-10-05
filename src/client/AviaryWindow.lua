@@ -18,43 +18,43 @@ local Viewport = require(script.Parent.Viewport)
 local AviaryWindow = {}
 
 local BIRD_VIEW = Vector3.new(-0.8, 0.35, -1)
-local CONFIRM_TIME = 3
 
 local window, body, headerInfo, perkLabel, bulkRarityButton
 local cards = {} -- [petId] = card
 local bulkRarity = 1
 local openNests -- set in Init
 
--- A button that needs two presses within a few seconds (for selling).
-local function confirmButton(props, normalText, onConfirm)
-	local armedUntil = 0
-	local button
-	button = UI.button(props, function()
-		if os.clock() < armedUntil then
-			armedUntil = 0
-			button.Text = normalText()
-			onConfirm()
-		else
-			armedUntil = os.clock() + CONFIRM_TIME
-			button.Text = "Sure?"
-			task.delay(CONFIRM_TIME, function()
-				if os.clock() >= armedUntil then
-					button.Text = normalText()
-				end
-			end)
-		end
-	end)
-	button.Text = normalText()
-	return button
-end
-
 local function perkSummary(perks)
 	local parts = {}
 	for _, perkId in ipairs(Pets.PerkOrder) do
-		local info = Pets.Perks[perkId]
-		table.insert(parts, info.Icon .. " +" .. math.floor((perks[perkId] or 0) * 100 + 0.5) .. "%")
+		if (perks[perkId] or 0) > 0 then
+			table.insert(parts, Pets.PerkText(perkId, perks[perkId]))
+		end
 	end
-	return table.concat(parts, "   ")
+	if #parts == 0 then
+		return "Send birds out into your garden: each kind gives a perk!"
+	end
+	return "Your garden: " .. table.concat(parts, "   ")
+end
+
+-- What "Sell spares" would sell right now (same rules as the server).
+local function bulkSellPreview()
+	local data = Store.Data
+	if not data then
+		return 0, 0
+	end
+	local now = Store.Now()
+	local maxRank = Rarities.Rank(Rarities.Order[bulkRarity])
+	local offered = Store.Trade and Store.Trade.Active and Store.Trade.MyPets or {}
+	local count, coins = 0, 0
+	for id, pet in pairs(data.Pets) do
+		local def = Pets.Def(pet)
+		if def and Rarities.Rank(def.Rarity) <= maxRank and Pets.IsSpare(pet, now) and not table.find(offered, id) then
+			count += 1
+			coins += Pets.SellPrice(pet, now, data.Perks)
+		end
+	end
+	return count, coins
 end
 
 local function buildCard(petId)
@@ -131,7 +131,7 @@ local function buildCard(petId)
 			Actions.Pet("Favorite", petId, not pet.Favorite)
 		end
 	end)
-	card.Sell = confirmButton({
+	card.Sell, card.SellArmed = UI.confirmButton({
 		Position = UDim2.new(0, 6, 1, -27),
 		Size = UDim2.new(1, -12, 0, 22),
 		BackgroundColor3 = UI.Colors.Gold,
@@ -199,7 +199,7 @@ local function updateCard(card, pet, order, now, perks)
 	card.Equip.BackgroundColor3 = pet.Nest and UI.Colors.Grey or (pet.Equipped and UI.Colors.Wood or UI.Colors.Green)
 	card.Favorite.Text = pet.Favorite and "❤" or "♡"
 	card.SellText = "Sell 🪙 " .. Util.FormatNumber(Pets.SellPrice(pet, now, perks))
-	if card.Sell.Text ~= "Sure?" then
+	if not card.SellArmed() then
 		card.Sell.Text = card.SellText
 	end
 	local canSell = not pet.Favorite and not pet.Nest
@@ -238,7 +238,7 @@ local function refresh()
 		.. "/"
 		.. Config.MaxEquippedPets
 		.. " out"
-	perkLabel.Text = "Perks from birds that are out:  " .. perkSummary(perks)
+	perkLabel.Text = perkSummary(perks)
 	body.Empty.Visible = #ids == 0
 end
 
@@ -289,16 +289,26 @@ function AviaryWindow.Init(screenGui, callbacks)
 	UI.button({
 		Text = "🥚 Breed",
 		BackgroundColor3 = Color3.fromRGB(230, 170, 80),
-		Size = UDim2.new(0.28, -4, 1, 0),
+		Size = UDim2.new(0.22, -4, 1, 0),
 		Parent = bar,
 	}, function()
 		AviaryWindow.Close()
 		openNests(nil)
 	end)
+	UI.button({
+		Name = "BestOut",
+		Text = "⭐ Best out",
+		BackgroundColor3 = UI.Colors.Green,
+		Position = UDim2.new(0.22, 2, 0, 0),
+		Size = UDim2.new(0.24, -4, 1, 0),
+		Parent = bar,
+	}, function()
+		Actions.Pet("EquipBest")
+	end)
 	bulkRarityButton = UI.button({
 		BackgroundColor3 = UI.Colors.Wood,
-		Position = UDim2.new(0.28, 4, 0, 0),
-		Size = UDim2.new(0.38, -8, 1, 0),
+		Position = UDim2.new(0.46, 2, 0, 0),
+		Size = UDim2.new(0.24, -4, 1, 0),
 		Parent = bar,
 	}, function()
 		bulkRarity = bulkRarity % #Rarities.Order + 1
@@ -307,18 +317,25 @@ function AviaryWindow.Init(screenGui, callbacks)
 	end)
 	bulkRarityButton.Text = "≤ " .. Rarities.Order[bulkRarity] .. " ▾"
 	bulkRarityButton.TextColor3 = Rarities.Color(Rarities.Order[bulkRarity])
-	confirmButton({
+	UI.confirmButton({
+		Name = "SellSpares",
 		BackgroundColor3 = UI.Colors.Gold,
 		TextColor3 = UI.Colors.Text,
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, 0, 0, 0),
-		Size = UDim2.new(0.34, -4, 1, 0),
+		Size = UDim2.new(0.3, -2, 1, 0),
 		Parent = bar,
 	}, function()
-		-- spares: birds that aren't out, nesting or favorites
+		-- spares: not out, nesting, favorites, shiny, in a family, babies or 4+ stars
 		return "💰 Sell spares"
 	end, function()
 		Actions.Pet("SellBulk", Rarities.Order[bulkRarity])
+	end, function()
+		local count, coins = bulkSellPreview()
+		if count == 0 then
+			return false -- let the server explain there's nothing to sell
+		end
+		return "Sell " .. count .. " for 🪙 " .. Util.FormatNumber(coins) .. "?"
 	end)
 
 	Store.Changed:Connect(function(what)

@@ -136,6 +136,14 @@ local function addNameTag(model, marker)
 	gui.Parent = model.PrimaryPart
 end
 
+local function placeModel(state, heightOffset)
+	local body = state.Model and state.Model.PrimaryPart
+	if body then
+		local position = state.Position + Vector3.new(0, state.StandHeight + (heightOffset or 0), 0)
+		body.CFrame = CFrame.new(position) * CFrame.Angles(0, state.Yaw, 0)
+	end
+end
+
 local function buildModel(state)
 	if state.Model then
 		state.Model:Destroy()
@@ -162,8 +170,12 @@ local function buildModel(state)
 		tostring(marker:GetAttribute("Stars")),
 		tostring(marker:GetAttribute("DisplayName")),
 	}, "|")
-	model.Parent = container
 	model:AddTag("BirdGardenBird")
+	-- only show it once we know where it is (its garden may not have streamed in yet)
+	if state.Position then
+		placeModel(state)
+		model.Parent = container
+	end
 end
 
 ------------------------------------------------------------------------------
@@ -226,14 +238,6 @@ local function chooseNext(state, now)
 	startIdle(state, now)
 end
 
-local function placeModel(state, heightOffset)
-	local body = state.Model and state.Model.PrimaryPart
-	if body then
-		local position = state.Position + Vector3.new(0, state.StandHeight + (heightOffset or 0), 0)
-		body.CFrame = CFrame.new(position) * CFrame.Angles(0, state.Yaw, 0)
-	end
-end
-
 local function faceToward(state, direction, dt)
 	if direction.Magnitude > 0.05 then
 		state.Yaw = lerpAngle(state.Yaw, yawToward(direction), math.min(1, dt * TURN_SPEED))
@@ -245,6 +249,9 @@ local function updatePet(state, dt, now)
 	if not state.Plot or not state.Plot.Parent then
 		state.Plot = plotFor(marker:GetAttribute("PlotId"))
 		if not state.Plot then
+			if state.Model then
+				state.Model.Parent = nil
+			end
 			return
 		end
 	end
@@ -255,6 +262,8 @@ local function updatePet(state, dt, now)
 			local landing = randomPoint(state.Plot)
 			if landing then
 				startFlight(state, landing, false)
+			else
+				startIdle(state, now)
 			end
 		else
 			state.Position = randomPoint(state.Plot)
@@ -267,6 +276,10 @@ local function updatePet(state, dt, now)
 	local model = state.Model
 	if not model then
 		return
+	end
+	if model.Parent ~= container then
+		placeModel(state)
+		model.Parent = container
 	end
 
 	if marker:GetAttribute("Mode") == "Nest" then
@@ -334,6 +347,9 @@ local function updatePet(state, dt, now)
 				startIdle(state, now)
 			end
 		end
+	else
+		-- never get stuck without something to do
+		startIdle(state, now)
 	end
 	if state.Hover then
 		hoverHeight += 1.2 + math.sin(now * 3) * 0.15

@@ -96,7 +96,7 @@ function ShopService.Buy(player, seedId)
 	end
 	local data = profile.Data
 	if data.Coins < seed.Price then
-		return false, "Not enough coins! Befriend more birds to earn coins."
+		return false, "Not enough coins! Sell spare birds in 🐦 Birds to get coins."
 	end
 
 	data.Coins -= seed.Price

@@ -27,6 +27,20 @@ local function partnerOf(session, player)
 	return session.Players[1] == player and session.Players[2] or session.Players[1]
 end
 
+-- Trading is only fair if both saves will stick (one side failing to load
+-- would make the other side's birds vanish).
+local function savingProblem(a, b)
+	local pa, pb = DataService.GetProfile(a), DataService.GetProfile(b)
+	if not pa or not pb then
+		return "That player is still loading."
+	end
+	if pa.CanSave ~= pb.CanSave then
+		local who = pa.CanSave and b or a
+		return "Trading is paused: " .. who.DisplayName .. "'s progress can't be saved right now."
+	end
+	return nil
+end
+
 local function stateFor(session, player)
 	local other = partnerOf(session, player)
 	local mine, theirs = session.Offers[player], session.Offers[other]
@@ -49,6 +63,7 @@ local function stateFor(session, player)
 		MyReady = session.Ready[player] == true,
 		TheirReady = session.Ready[other] == true,
 		ExecuteAt = session.ExecuteAt,
+		Revision = session.Revision,
 		ServerNow = Util.Now(),
 	}
 end
@@ -72,9 +87,12 @@ local function endSession(session, reason, completed)
 	end
 end
 
+-- Any change to an offer bumps the revision and un-readies both players. A
+-- "Ready" only counts for the revision the player was looking at.
 local function unready(session)
 	session.Ready = {}
 	session.ExecuteAt = nil
+	session.Revision += 1
 end
 
 local function isEmpty(session)
@@ -98,8 +116,9 @@ function TradeService.Request(player, targetUserId)
 	if not target or target == player then
 		return
 	end
-	if not DataService.Get(player) or not DataService.Get(target) then
-		Net.Notify:FireClient(player, "That player is still loading.", "Error")
+	local problem = savingProblem(player, target)
+	if problem then
+		Net.Notify:FireClient(player, problem, "Error")
 		return
 	end
 	if sessions[player] then
@@ -148,7 +167,10 @@ function TradeService.Respond(player, fromUserId, accept)
 		Net.Notify:FireClient(player, "One of you is already trading.", "Error")
 		return
 	end
-	if not DataService.Get(player) or not DataService.Get(from) then
+	local problem = savingProblem(player, from)
+	if problem then
+		Net.Notify:FireClient(player, problem, "Error")
+		Net.Notify:FireClient(from, problem, "Error")
 		return
 	end
 	local session = {
@@ -158,6 +180,8 @@ function TradeService.Respond(player, fromUserId, accept)
 			[player] = { Pets = {}, Coins = 0 },
 		},
 		Ready = {},
+		Revision = 1,
+		Sent = {},
 	}
 	sessions[from] = session
 	sessions[player] = session
@@ -212,6 +236,11 @@ function TradeService.Update(player, action, value)
 		offer.Coins = coins
 		unready(session)
 	elseif action == "Ready" then
+		if value ~= session.Revision then
+			-- the offer changed after this player looked at it
+			sendState(session)
+			return
+		end
 		if isEmpty(session) then
 			Net.Notify:FireClient(player, "Add a bird or some coins to the trade first.", "Error")
 			return
@@ -259,7 +288,7 @@ local function execute(session)
 	local dataA, dataB = DataService.Get(a), DataService.Get(b)
 	local offerA, offerB = session.Offers[a], session.Offers[b]
 
-	local problem = problemWith(a, dataA, offerA) or problemWith(b, dataB, offerB)
+	local problem = problemWith(a, dataA, offerA) or problemWith(b, dataB, offerB) or savingProblem(a, b)
 	if not problem then
 		if Pets.CountPets(dataA.Pets) - #offerA.Pets + #offerB.Pets > Config.MaxPets then
 			problem = a.DisplayName .. "'s aviary doesn't have room."
@@ -345,8 +374,21 @@ function TradeService.Revalidate(player)
 	end
 	if changed then
 		unready(session)
+		sendState(session)
+		return
 	end
-	sendState(session)
+	-- an offered bird may have changed (a baby grew up): only then resend
+	local summary = {}
+	for _, id in ipairs(offer.Pets) do
+		local pet = data.Pets[id]
+		local info = PetService.Summary(pet, id)
+		table.insert(summary, info.Name .. tostring(info.Baby) .. info.Stars .. info.Value)
+	end
+	local signature = table.concat(summary, "|")
+	if session.Sent[player] ~= signature then
+		session.Sent[player] = signature
+		sendState(session)
+	end
 end
 
 function TradeService.PlayerLeft(player)

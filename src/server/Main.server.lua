@@ -90,7 +90,7 @@ local function onPlayerAdded(player)
 	Net.ShopUpdated:FireClient(player, ShopService.Snapshot(player))
 	Net.Notify:FireClient(
 		player,
-		"Welcome to your Bird Garden! Plant seeds and wait for birds to visit. 🐦",
+		"Welcome to your Bird Garden! Plant seeds, befriend the birds that visit, and sell spares for coins. 🐦",
 		"Success"
 	)
 end
@@ -164,6 +164,8 @@ Net.PetAction.OnServerInvoke = function(player, action, a, b, c)
 		return PetService.SetFavorite(player, a, b == true)
 	elseif action == "Sell" then
 		return PetService.Sell(player, a)
+	elseif action == "EquipBest" then
+		return PetService.EquipBest(player)
 	elseif action == "SellBulk" then
 		return PetService.SellBulk(player, a)
 	elseif action == "Breed" then

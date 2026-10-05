@@ -221,6 +221,10 @@ roblox.implementMethod("Instance", "GetDebugId", function(instance)
 	return tostring(instance)
 end)
 
+roblox.implementMethod("Instance", "GetPropertyChangedSignal", function(instance, property)
+	return signalFor(instance, "Changed:" .. property)
+end)
+
 signalProperty("Instance", "DescendantAdded")
 signalProperty("Instance", "Destroying")
 signalProperty("Instance", "ChildAdded")
@@ -416,7 +420,12 @@ roblox.implementMethod("DataStoreService", "GetDataStore", function(_, name)
 		end,
 		UpdateAsync = function(_, key, transform)
 			task.wait(0.1)
-			store[key] = deepCopy(transform(deepCopy(store[key])))
+			local result = transform(deepCopy(store[key]))
+			-- returning nil cancels the write, like Roblox
+			if result ~= nil then
+				store[key] = deepCopy(result)
+			end
+			return result
 		end,
 	}
 end)

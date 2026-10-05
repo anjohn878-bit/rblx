@@ -54,7 +54,7 @@ Pets.Perks = {
 		Icon = "🎒",
 		Name = "Seed Finder",
 		Description = "chance each minute to find a seed",
-		PerPoint = 0.04,
+		PerPoint = 0.07,
 		Max = 0.9,
 	},
 }
@@ -170,6 +170,18 @@ function Pets.BaseValue(pet, now)
 		value *= BABY_VALUE
 	end
 	return math.max(1, math.floor(value))
+end
+
+-- Spares are the birds "Sell spares" may sell. Anything special is kept:
+-- birds that are out, nesting, favorites, shiny, in a family, babies or 4+ stars.
+function Pets.IsSpare(pet, now)
+	return not pet.Equipped
+		and not pet.Nest
+		and not pet.Favorite
+		and not pet.Shiny
+		and not pet.Family
+		and not Pets.IsBaby(pet, now)
+		and (pet.Stars or 1) < 4
 end
 
 function Pets.SellPrice(pet, now, perks)

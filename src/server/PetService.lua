@@ -45,8 +45,33 @@ local function randomName()
 	return Pets.FirstNames[rng:NextInteger(1, #Pets.FirstNames)]
 end
 
-function PetService.RandomFamilyName()
-	return Pets.FamilyNames[rng:NextInteger(1, #Pets.FamilyNames)]
+local NUMERALS = { "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X" }
+
+-- A surname nobody in this aviary uses yet, so families never get mixed up.
+function PetService.NewFamilyName(data)
+	local used = {}
+	for _, pet in pairs(data.Pets) do
+		if pet.Family then
+			used[pet.Family] = true
+		end
+	end
+	local free = {}
+	for _, name in ipairs(Pets.FamilyNames) do
+		if not used[name] then
+			table.insert(free, name)
+		end
+	end
+	if #free > 0 then
+		return free[rng:NextInteger(1, #free)]
+	end
+	local base = Pets.FamilyNames[rng:NextInteger(1, #Pets.FamilyNames)]
+	for n = 2, 1000 do
+		local name = base .. " " .. (NUMERALS[n - 1] or tostring(n))
+		if not used[name] then
+			return name
+		end
+	end
+	return base
 end
 
 local function rollWildStars()
@@ -88,7 +113,10 @@ function PetService.GetPerks(player)
 	if not perks then
 		local data = DataService.Get(player)
 		perks = Pets.ComputePerks(data and data.Pets or {}, Util.Now())
-		perkCache[player] = perks
+		-- only remember real perks (not the empty ones from before the save loads)
+		if data then
+			perkCache[player] = perks
+		end
 	end
 	return perks
 end
@@ -111,6 +139,7 @@ local function findRoamingParent(player, data, pet)
 			if
 				other ~= pet
 				and other.Family == pet.Family
+				and other.Species == pet.Species
 				and other.Equipped
 				and not other.Nest
 				and not other.GrowsUpAt
@@ -195,8 +224,23 @@ end
 ------------------------------------------------------------------------------
 -- Catching
 
--- A befriended bird joins the aviary. Returns pet, petId (nil if the aviary
--- was full and it was sold instead), coins earned, first time seen.
+-- The weakest roaming bird that could make way for a better one.
+local function weakestOut(data, now)
+	local weakestId, weakestPoints
+	for id, pet in pairs(data.Pets) do
+		if pet.Equipped and not pet.Nest and not pet.Favorite and not Pets.IsBaby(pet, now) then
+			local points = Pets.Points(pet, now)
+			if not weakestPoints or points < weakestPoints then
+				weakestId, weakestPoints = id, points
+			end
+		end
+	end
+	return weakestId, weakestPoints
+end
+
+-- A befriended bird joins the aviary.
+-- Returns pet, petId, coins earned, first time seen, refusal ("Full"), and the
+-- pet it replaced in the garden (if it was better than one that was out).
 function PetService.Befriend(player, def, shiny)
 	local data = DataService.Get(player)
 	if not data then
@@ -205,8 +249,15 @@ function PetService.Befriend(player, def, shiny)
 	local now = Util.Now()
 	local perks = PetService.GetPerks(player)
 	local pet = PetService.NewPet({ Species = def.Id, Shiny = shiny, Stars = rollWildStars() })
-
 	local firstTime = (data.Journal[def.Id] or 0) == 0
+	local count = Pets.CountPets(data.Pets)
+	local full = count >= Config.MaxPets
+
+	-- never throw away anything special just because the aviary is full
+	if full and (shiny or firstTime or pet.Stars >= 3 or Rarities.Rank(def.Rarity) >= Rarities.Rank("Rare")) then
+		return nil, nil, 0, false, "Full"
+	end
+
 	data.Journal[def.Id] = (data.Journal[def.Id] or 0) + 1
 	if shiny then
 		data.ShinyJournal[def.Id] = (data.ShinyJournal[def.Id] or 0) + 1
@@ -217,18 +268,48 @@ function PetService.Befriend(player, def, shiny)
 	if firstTime then
 		coins += math.floor(Pets.BaseValue(pet, now) * Config.DiscoveryBonusMultiplier * (1 + perks.Coins))
 	end
-	local id
-	if Pets.CountPets(data.Pets) >= Config.MaxPets then
+	local id, replaced
+	if full then
+		-- a plain bird and no room: it's sold straight away
 		coins += Pets.SellPrice(pet, now, perks)
 	else
 		id = PetService.AddPet(data, pet)
 		if Pets.CountEquipped(data.Pets) < Config.MaxEquippedPets then
 			pet.Equipped = true
+		else
+			-- better than one of the birds that's out? swap them
+			local weakestId, weakestPoints = weakestOut(data, now)
+			if weakestId and Pets.Points(pet, now) > weakestPoints then
+				replaced = data.Pets[weakestId]
+				replaced.Equipped = false
+				pet.Equipped = true
+			end
+		end
+		if count + 1 == Config.MaxPets - 5 then
+			Net.Notify:FireClient(
+				player,
+				"Your aviary is almost full ("
+					.. count + 1
+					.. "/"
+					.. Config.MaxPets
+					.. "). Sell spares in 🐦 Birds to make room.",
+				"Info"
+			)
 		end
 	end
 	data.Coins += coins
 	PetService.Refresh(player)
-	return pet, id, coins, firstTime
+
+	if data.TotalBefriended == 1 then
+		task.delay(3, function()
+			Net.Notify:FireClient(
+				player,
+				"💡 Your birds live in the 🐦 Birds aviary. Send the best ones out to help your garden, and sell spares for coins!",
+				"Success"
+			)
+		end)
+	end
+	return pet, id, coins, firstTime, nil, replaced
 end
 
 ------------------------------------------------------------------------------
@@ -313,7 +394,37 @@ function PetService.Sell(player, petId)
 	return true, "Sold " .. Pets.DisplayName(pet) .. " for " .. Util.FormatNumber(price) .. " coins."
 end
 
--- Sells every bird at or below a rarity that isn't out, nesting, a favorite or in a trade.
+-- Sends out the strongest birds (by perk points).
+function PetService.EquipBest(player)
+	local data = DataService.Get(player)
+	if not data then
+		return false, "Your garden is still loading..."
+	end
+	local now = Util.Now()
+	local ids = {}
+	for id, pet in pairs(data.Pets) do
+		if not pet.Nest then
+			table.insert(ids, id)
+		end
+	end
+	if #ids == 0 then
+		return false, "You don't have any birds to send out yet."
+	end
+	table.sort(ids, function(a, b)
+		local pa, pb = Pets.Points(data.Pets[a], now), Pets.Points(data.Pets[b], now)
+		if pa ~= pb then
+			return pa > pb
+		end
+		return a < b
+	end)
+	for index, id in ipairs(ids) do
+		data.Pets[id].Equipped = index <= Config.MaxEquippedPets
+	end
+	PetService.Refresh(player)
+	return true, "Your best birds are out in the garden!"
+end
+
+-- Sells every spare bird (see Pets.IsSpare) at or below a rarity.
 function PetService.SellBulk(player, maxRarity)
 	local data = DataService.Get(player)
 	local maxRank = Rarities.Rank(maxRarity)
@@ -325,14 +436,20 @@ function PetService.SellBulk(player, maxRarity)
 	local sold, coins = 0, 0
 	for id, pet in pairs(data.Pets) do
 		local def = Pets.Def(pet)
-		if def and Rarities.Rank(def.Rarity) <= maxRank and not pet.Equipped and not sellBlocker(player, pet, id) then
+		if
+			def
+			and Rarities.Rank(def.Rarity) <= maxRank
+			and Pets.IsSpare(pet, now)
+			and not PetService.IsInTrade(player, id)
+		then
 			coins += Pets.SellPrice(pet, now, perks)
 			sold += 1
 			data.Pets[id] = nil
 		end
 	end
 	if sold == 0 then
-		return false, "No birds to sell. Birds that are out, nesting or favorites are kept."
+		return false,
+			"No spares to sell. Birds that are out, nesting, favorites, shiny, in a family, babies or 4⭐+ are kept."
 	end
 	data.Coins += coins
 	PetService.Refresh(player)
@@ -362,11 +479,16 @@ function PetService.PlayerLeft(player)
 	nextSeedRoll[player] = nil
 end
 
-local function pickFoundSeed(luck)
+-- A bird finds seeds up to one rarity above its own; cheaper seeds are more
+-- common, and the Lucky perk tilts it toward rarer ones.
+local function pickFoundSeed(finderRank, luck)
 	local weights = {}
 	for _, seed in ipairs(Seeds.List) do
 		local rank = Rarities.Rank(seed.Rarity)
-		table.insert(weights, { Seed = seed, Weight = seed.Stock.Chance * (1 + luck * (rank - 1)) })
+		if rank <= finderRank + 1 then
+			local weight = seed.Stock.Chance / math.sqrt(seed.Price) * (1 + luck * (rank - 1))
+			table.insert(weights, { Seed = seed, Weight = weight })
+		end
 	end
 	return Util.WeightedPick(weights, rng).Seed
 end
@@ -394,7 +516,7 @@ local function rollSeedFinder(player, data, now)
 	if not finder then
 		return
 	end
-	local seed = pickFoundSeed(perks.Luck)
+	local seed = pickFoundSeed(Rarities.Rank(Pets.Def(finder.Pet).Rarity), perks.Luck)
 	data.Seeds[seed.Id] = (data.Seeds[seed.Id] or 0) + 1
 	DataService.EnsureSelection(player)
 	PetService.SeedsChanged(player)
