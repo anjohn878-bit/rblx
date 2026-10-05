@@ -56,7 +56,10 @@ Mock.Advance(1)
 local Config = Mock.Require(shared.Config, "server")
 local Seeds = Mock.Require(shared.Seeds, "server")
 local Birds = Mock.Require(shared.Birds, "server")
+local Pets = Mock.Require(shared.Pets, "server")
+local Util = Mock.Require(shared.Util, "server")
 local DataService = Mock.Require(server.DataService, "server")
+local PetService = Mock.Require(server.PetService, "server")
 
 local root = workspace:FindFirstChild("BirdGarden")
 check(root ~= nil, "BirdGarden folder exists")
@@ -201,20 +204,31 @@ local perchHeight = bird.Body.CFrame.Position.Y
 check(perchHeight > plant.Root.CFrame.Position.Y + 2, "bird perches on top of the plant")
 
 local birdDef = Birds.Get(bird:GetAttribute("BirdId"))
+local birdWasShiny = bird:GetAttribute("Shiny")
 local coinsBefore = data.Coins
-local multiplier = Config.DiscoveryBonusMultiplier * (bird:GetAttribute("Shiny") and Config.ShinyMultiplier or 1)
 Mock.SignalFor(prompt, "Triggered"):Fire(bob)
 Mock.Advance(0.2)
-check(data.Coins == coinsBefore, "Bob can't befriend Alice's bird")
+check(next(data.Pets) == nil, "Bob can't befriend Alice's bird")
 Mock.SignalFor(prompt, "Triggered"):Fire(alice)
 Mock.Advance(0.2)
-check(data.Coins == coinsBefore + birdDef.Reward * multiplier, "befriending pays coins with discovery bonus")
+local firstPetId, firstPet = next(data.Pets)
+check(firstPet and firstPet.Species == birdDef.Id, "befriended bird joins the aviary as a pet")
+check(firstPet and firstPet.Shiny == (birdWasShiny == true), "pet keeps the bird's shininess")
+check(firstPet and firstPet.Equipped == true, "first pets go straight out into the garden")
+check(firstPet and firstPet.Stars >= 1 and firstPet.Stars <= 3, "wild birds have 1-3 stars")
+check(type(firstPet and firstPet.Name) == "string", "pet gets a name (" .. tostring(firstPet and firstPet.Name) .. ")")
+local discoveryBonus = math.floor(Pets.BaseValue(firstPet, 0) * Config.DiscoveryBonusMultiplier)
+check(data.Coins == coinsBefore + discoveryBonus, "first of a species pays a discovery bonus")
 check(data.Journal[birdDef.Id] == 1, "journal records the bird")
 check(data.TotalBefriended == 1, "total befriended")
 check(leaderstats.Birds.Value == 1, "leaderstats birds")
-Mock.Advance(5)
-check(bird.Parent == nil, "bird flies away after being befriended")
+check(bird.Parent == nil, "the wild bird is replaced by the pet")
 check(plant:GetAttribute("HasBird") == false, "plant is free for the next bird")
+local markers = ReplicatedStorage:FindFirstChild("BirdGardenPets")
+local firstMarkerName = "101_" .. tostring(firstPetId)
+local firstMarker = markers and markers:FindFirstChild(firstMarkerName)
+check(firstMarker ~= nil, "a roaming marker is published for the pet")
+check(firstMarker and typeof(firstMarker:GetAttribute("SpawnAt")) == "Vector3", "pet starts where the bird was")
 
 -- an ignored bird leaves on its own
 local secondBird
@@ -230,9 +244,150 @@ Mock.Advance(Config.BirdStayTime + 6)
 check(secondBird.Parent == nil, "ignored bird flies away after its stay")
 
 ------------------------------------------------------------------------------
-section("Seed shop")
+section("Pets roam and help")
 
 local Net = Mock.Require(shared.Net, "server")
+
+local function givePet(player, fields)
+	local d = DataService.Get(player)
+	local id = PetService.AddPet(d, PetService.NewPet(fields))
+	PetService.Refresh(player)
+	return id, d.Pets[id]
+end
+local function petAction(...)
+	return Net.PetAction:InvokeServer(...)
+end
+local function notified(pattern, since)
+	for i = since or 1, #Mock.RemoteLog do
+		local entry = Mock.RemoteLog[i]
+		if entry.Remote == "Notify" and tostring(entry.Args[1]):find(pattern) then
+			return true
+		end
+	end
+	return false
+end
+
+-- the client draws the pet hopping around the garden
+Mock.SignalFor(markers, "ChildAdded"):Fire(firstMarker)
+Mock.Advance(3, 1 / 30)
+local petModels = workspace:FindFirstChild("BirdGardenPetModels")
+local petModel = petModels and petModels:FindFirstChild(firstMarkerName)
+check(petModel ~= nil, "client draws the pet bird")
+local ground = plot1.Ground
+local inside, moved = true, false
+local lastPosition = petModel and petModel.Body.CFrame.Position
+for _ = 1, 30 do
+	Mock.Advance(2, 1 / 30)
+	local position = petModel.Body.CFrame.Position
+	local localPosition = ground.CFrame:PointToObjectSpace(position)
+	if math.abs(localPosition.X) > ground.Size.X / 2 or math.abs(localPosition.Z) > ground.Size.Z / 2 then
+		inside = false
+	end
+	if (position - lastPosition).Magnitude > 0.5 then
+		moved = true
+	end
+	lastPosition = position
+end
+check(moved, "pet moves around")
+check(inside, "pet stays inside its own garden")
+check(
+	ClientStore.Data.Perks[birdDef.Perk] and ClientStore.Data.Perks[birdDef.Perk] > 0,
+	"roaming pet gives its " .. birdDef.Perk .. " perk"
+)
+
+local ok, message = petAction("Unequip", firstPetId)
+check(ok and not data.Pets[firstPetId].Equipped, "put a bird away")
+check(markers:FindFirstChild(firstMarkerName) == nil, "it leaves the garden")
+ok = petAction("Equip", firstPetId)
+check(ok and markers:FindFirstChild(firstMarkerName) ~= nil, "send it back out")
+
+local sparrows = {}
+for i = 1, 6 do
+	sparrows[i] = givePet(alice, { Species = "Sparrow" })
+end
+for i = 1, 6 do
+	ok, message = petAction("Equip", sparrows[i])
+end
+check(
+	not ok and Pets.CountEquipped(data.Pets) == Config.MaxEquippedPets,
+	"only 6 birds out at once (" .. tostring(message) .. ")"
+)
+
+local spare = sparrows[6]
+petAction("Favorite", spare, true)
+ok = petAction("Sell", spare)
+check(not ok and data.Pets[spare] ~= nil, "favorites can't be sold")
+petAction("Favorite", spare, false)
+coinsBefore = data.Coins
+local price = Pets.SellPrice(data.Pets[spare], Util.Now(), PetService.GetPerks(alice))
+ok = petAction("Sell", spare)
+check(ok and data.Pets[spare] == nil and data.Coins == coinsBefore + price, "sold a bird for " .. price .. " coins")
+ok = petAction("Sell", "P9999")
+check(not ok, "can't sell a bird you don't have")
+ok = petAction("Sell", { "bad" })
+check(not ok, "bad input is rejected")
+
+local pigeons = {}
+for i = 1, 3 do
+	pigeons[i] = givePet(alice, { Species = "Pigeon" })
+end
+local favoritePigeon = givePet(alice, { Species = "Pigeon", Favorite = true })
+local toucan = givePet(alice, { Species = "Toucan" })
+ok, message = petAction("SellBulk", "Common")
+check(
+	ok and data.Pets[pigeons[1]] == nil and data.Pets[pigeons[3]] == nil,
+	"bulk sell sells spare commons (" .. tostring(message) .. ")"
+)
+check(
+	data.Pets[favoritePigeon] and data.Pets[toucan] and data.Pets[sparrows[1]],
+	"bulk sell keeps favorites, rarer birds and birds that are out"
+)
+
+-- aviary window
+for _, child in ipairs(gui.Hud.Buttons:GetChildren()) do
+	if child:IsA("TextButton") and child.LayoutOrder == 4 then
+		Mock.SignalFor(child, "Activated"):Fire()
+	end
+end
+Mock.Advance(0.5)
+local aviary = gui:FindFirstChild("🐦 My Birds")
+check(aviary and aviary.Visible, "aviary window opens")
+check(aviary and aviary.Body:FindFirstChild(toucan) ~= nil, "aviary shows a card per bird")
+
+-- Green Thumb: plants grow faster
+for i = 1, 5 do
+	petAction("Unequip", sparrows[i])
+end
+local hummingbird = givePet(alice, { Species = "Hummingbird", Stars = 5, Shiny = true })
+petAction("Equip", hummingbird)
+Mock.Advance(1)
+local speed = plot1.Plants.Plant1:GetAttribute("Speed")
+check(speed and speed > 1.2, "Hummingbird makes plants grow faster (x" .. tostring(speed) .. ")")
+
+-- Seed finders bring seeds
+local function seedCount()
+	local total = 0
+	for _, count in pairs(data.Seeds) do
+		total += count
+	end
+	return total
+end
+local finders = { toucan }
+petAction("Equip", toucan)
+for i = 1, 3 do
+	finders[i + 1] = givePet(alice, { Species = "Toucan", Stars = 5, Shiny = true })
+	petAction("Equip", finders[i + 1])
+end
+check(PetService.GetPerks(alice).SeedFinder >= 0.89, "seed finder chance is capped at 90%")
+local seedsBefore = seedCount()
+local logStart = #Mock.RemoteLog
+Mock.Advance(Config.SeedFinderInterval * 5 + 1, 0.5)
+check(seedCount() > seedsBefore, "pets found seeds (" .. seedCount() - seedsBefore .. ")")
+check(notified("found a", logStart), "player is told what was found")
+
+------------------------------------------------------------------------------
+section("Seed shop")
+
 Mock.SignalFor(shop.Counter.ShopPrompt, "Triggered"):Fire(alice)
 Mock.Advance(0.5)
 local shopWindow = gui:FindFirstChild("🌱 Seed Shop")
@@ -253,7 +408,7 @@ check((data.Seeds.Sunflower or 0) == seedsBefore + 1, "bought a Sunflower seed")
 check(data.Coins == coinsBefore - Seeds.Get("Sunflower").Price, "paid for the seed")
 
 -- can't afford the Ember Bloom
-local ok, message = Net.BuySeed.OnServerInvoke(alice, "EmberBloom")
+ok, message = Net.BuySeed.OnServerInvoke(alice, "EmberBloom")
 check(not ok, "can't buy what you can't afford (" .. tostring(message) .. ")")
 ok = Net.BuySeed.OnServerInvoke(alice, 12345)
 check(not ok, "bad input is rejected")
@@ -317,6 +472,168 @@ local card = journalWindow.Body:FindFirstChild(birdDef.Id)
 check(card ~= nil, "journal has a card for " .. birdDef.Id)
 
 ------------------------------------------------------------------------------
+section("Breeding and families")
+
+for _, id in ipairs(finders) do
+	petAction("Unequip", id)
+end
+local mum = givePet(alice, { Species = "Cardinal", Stars = 2 })
+local dad = givePet(alice, { Species = "Cardinal", Stars = 4, Shiny = true })
+local jay = givePet(alice, { Species = "BlueJay" })
+ok = petAction("Breed", mum, jay)
+check(not ok, "different kinds can't breed")
+ok = petAction("Breed", mum, mum)
+check(not ok, "a bird can't breed with itself")
+petAction("Equip", mum)
+ok, message = petAction("Breed", mum, dad)
+check(ok, "two Cardinals start a nest (" .. tostring(message) .. ")")
+local nestEntry = data.Nests["1"]
+check(nestEntry and nestEntry.Species == "Cardinal", "nest 1 has a Cardinal egg")
+check(data.Pets[mum].Nest == 1 and not data.Pets[mum].Equipped, "parents sit on the nest")
+check(markers:FindFirstChild("101_" .. mum):GetAttribute("Mode") == "Nest", "parents are drawn at the nest")
+check(plot1.Nest1:FindFirstChild("Egg") ~= nil, "an egg appears in the nest")
+check(plot1.Nest1.NestBase:GetAttribute("Species") == "Cardinal", "nest shows what's hatching")
+ok = petAction("Sell", mum)
+check(not ok, "nesting birds can't be sold")
+ok = petAction("Equip", mum)
+check(not ok, "nesting birds can't go out")
+
+Mock.SignalFor(plot1.Nest1.NestBase.NestPrompt, "Triggered"):Fire(alice)
+Mock.Advance(0.5)
+local nestWindow = gui:FindFirstChild("🥚 Nests & Families")
+check(nestWindow and nestWindow.Visible, "nest prompt opens the nest window")
+
+logStart = #Mock.RemoteLog
+Mock.Advance(Pets.BreedTime("Cardinal") + 1, 0.5)
+local babyId, baby
+for id, pet in pairs(data.Pets) do
+	if pet.Generation == 1 then
+		babyId, baby = id, pet
+	end
+end
+check(baby ~= nil and baby.Species == "Cardinal", "a baby Cardinal hatched")
+check(
+	baby and baby.Family and data.Pets[mum].Family == baby.Family and data.Pets[dad].Family == baby.Family,
+	"parents and baby share a family name (" .. tostring(baby and baby.Family) .. ")"
+)
+check(
+	baby and (baby.Stars == 3 or baby.Stars == 4),
+	"baby inherits its parents' stars (" .. tostring(baby and baby.Stars) .. ")"
+)
+check(baby and Pets.IsBaby(baby, Util.Now()), "it starts as a baby")
+check(data.Nests["1"] == nil and plot1.Nest1:FindFirstChild("Egg") == nil, "the nest is empty again")
+check(not data.Pets[mum].Nest and data.Pets[mum].Equipped, "mum goes back out after hatching")
+check(data.TotalHatched == 1, "hatch counted")
+check(notified("hatched", logStart), "player hears about the baby")
+local babyMarker = markers:FindFirstChild("101_" .. babyId)
+check(babyMarker and babyMarker:GetAttribute("Baby") == true, "baby roams the garden")
+check(babyMarker and babyMarker:GetAttribute("Follow") == "101_" .. mum, "baby follows its mum")
+
+ok = petAction("Breed", babyId, mum)
+check(not ok, "babies are too young to breed")
+Mock.Advance(Pets.GrowUpTime("Cardinal") + 1, 1)
+check(baby.GrowsUpAt == nil, "baby grows up")
+check(markers:FindFirstChild("101_" .. babyId):GetAttribute("Baby") == false, "grown-up is drawn full size")
+
+ok = petAction("Breed", mum, dad, 2)
+check(ok and data.Nests["2"] ~= nil, "can pick a nest")
+ok = petAction("CancelNest", 2)
+check(ok and data.Nests["2"] == nil and not data.Pets[dad].Nest, "cancelling a nest frees the parents")
+
+------------------------------------------------------------------------------
+section("Trading")
+
+local bobData = DataService.Get(bob)
+local peacock = givePet(bob, { Species = "Peacock", Stars = 3 })
+bobData.Coins = 500
+logStart = #Mock.RemoteLog
+Net.TradeRequest:FireServer(bob.UserId)
+Mock.Advance(0.2)
+local requested = false
+for i = logStart, #Mock.RemoteLog do
+	local entry = Mock.RemoteLog[i]
+	if entry.Remote == "TradeIncoming" and entry.Player == "Bob" then
+		requested = true
+	end
+end
+check(requested, "Bob gets the trade request")
+Mock.SignalFor(Net.TradeRespond, "OnServerEvent"):Fire(bob, alice.UserId, true)
+Mock.Advance(0.2)
+check(ClientStore.Trade and ClientStore.Trade.Active, "trade starts after Bob accepts")
+local tradeWindow = gui:FindFirstChild("🤝 Trade")
+check(tradeWindow and tradeWindow.Visible and tradeWindow.Trade.Visible, "trade window opens")
+
+local function bobDoes(action, value)
+	Mock.SignalFor(Net.TradeUpdate, "OnServerEvent"):Fire(bob, action, value)
+	Mock.Advance(0.1)
+end
+Net.TradeUpdate:FireServer("AddPet", jay)
+bobDoes("AddPet", peacock)
+bobDoes("SetCoins", 100)
+check(
+	ClientStore.Trade.TheirPets[1] and ClientStore.Trade.TheirPets[1].Species == "Peacock",
+	"Alice sees Bob's Peacock"
+)
+check(ClientStore.Trade.TheirCoins == 100, "and his coins")
+ok = petAction("Sell", jay)
+check(not ok and data.Pets[jay], "a bird in a trade can't be sold")
+Net.TradeUpdate:FireServer("AddPet", favoritePigeon)
+Mock.Advance(0.1)
+check(#ClientStore.Trade.MyPets == 1, "favorites can't be offered")
+Net.TradeUpdate:FireServer("AddPet", mum)
+Mock.Advance(0.1)
+
+Net.TradeUpdate:FireServer("Ready")
+bobDoes("Ready")
+check(ClientStore.Trade.ExecuteAt ~= nil, "both ready starts the countdown")
+bobDoes("SetCoins", 50)
+check(not ClientStore.Trade.MyReady and ClientStore.Trade.ExecuteAt == nil, "any change un-readies both")
+Net.TradeUpdate:FireServer("RemovePet", mum)
+Net.TradeUpdate:FireServer("Ready")
+bobDoes("Ready")
+local aliceCoins, bobCoins = data.Coins, bobData.Coins
+Mock.Advance(Config.TradeCountdown + 1)
+local gotPeacock = false
+for _, pet in pairs(data.Pets) do
+	if pet.Species == "Peacock" then
+		gotPeacock = not pet.Equipped
+	end
+end
+local gotJay = false
+for _, pet in pairs(bobData.Pets) do
+	if pet.Species == "BlueJay" then
+		gotJay = true
+	end
+end
+check(gotPeacock and data.Pets[jay] == nil, "Alice traded her Blue Jay for the Peacock")
+check(gotJay and bobData.Pets[peacock] == nil, "Bob got the Blue Jay")
+check(data.Coins == aliceCoins + 50 and bobData.Coins == bobCoins - 50, "coins changed hands")
+check(ClientStore.Trade and not ClientStore.Trade.Active, "trade is over")
+Mock.Advance(0.5)
+local savedBob = Mock.SavedData[Config.DataStoreName]["Player_202"]
+local savedHasPeacock = false
+for _, pet in pairs(savedBob.Pets) do
+	if pet.Species == "Peacock" then
+		savedHasPeacock = true
+	end
+end
+check(not savedHasPeacock, "trade is saved straight away")
+
+-- coins are capped, and leaving cancels the trade
+Mock.Advance(Config.TradeRequestCooldown + 1)
+Net.TradeRequest:FireServer(bob.UserId)
+Mock.Advance(0.1)
+Mock.SignalFor(Net.TradeRespond, "OnServerEvent"):Fire(bob, alice.UserId, true)
+Mock.Advance(0.1)
+bobDoes("SetCoins", 1e12)
+check(ClientStore.Trade.TheirCoins == bobData.Coins, "can't offer more coins than you have")
+bobDoes("SetCoins", 0 / 0)
+check(ClientStore.Trade.TheirCoins == bobData.Coins, "nonsense coin amounts are ignored")
+Mock.RemovePlayer(bob)
+Mock.Advance(0.5)
+check(ClientStore.Trade and not ClientStore.Trade.Active, "trade ends when the other player leaves")
+
+------------------------------------------------------------------------------
 section("Restock")
 
 local restocked = false
@@ -343,6 +660,7 @@ check(plot1.Tile2:FindFirstChild("PlantPrompt") ~= nil, "tile is plantable again
 section("Leaving and coming back")
 
 local coinsAtLeave = data.Coins
+local petsAtLeave = Pets.CountPets(data.Pets)
 Mock.RemovePlayer(alice)
 Mock.Advance(1)
 check(plot1.GateSign.Sign.Label.Text == "Empty Garden", "plot is freed")
@@ -354,6 +672,8 @@ Mock.Advance(2)
 local data2 = DataService.Get(alice2)
 check(data2 and data2.Coins == coinsAtLeave, "coins were saved")
 check(data2 and data2.Journal[birdDef.Id] == 1, "journal was saved")
+check(data2 and Pets.CountPets(data2.Pets) == petsAtLeave, "pets were saved")
+check(data2 and data2.Pets[babyId] and data2.Pets[babyId].Family == baby.Family, "families were saved")
 local newPlot = plotsFolder:FindFirstChild("Plot" .. alice2:GetAttribute("PlotId"))
 local restored = newPlot.Plants:FindFirstChild("Plant1")
 check(restored and restored:GetAttribute("Stage") == 4, "planted Sunflower is restored, still blooming")
@@ -364,22 +684,28 @@ section("Growth continues while offline")
 Mock.RemovePlayer(alice2)
 Mock.Advance(1)
 local saved = Mock.SavedData[Config.DataStoreName]["Player_101"]
-saved.Plants["5"] = { Seed = "MangoTree", PlantedAt = saved.Plants["1"].PlantedAt }
+local nowSeconds = math.floor(Util.Now())
+saved.Plants["5"] = { Seed = "MangoTree", Grown = 0, SavedAt = nowSeconds - 400 }
+-- a plant saved before pets existed
+saved.Plants["6"] = { Seed = "Sunflower", PlantedAt = nowSeconds - 100 }
 local alice3 = Mock.AddPlayer("Alice", 101, false)
 Mock.SpawnCharacter(alice3)
 Mock.Advance(2)
 newPlot = plotsFolder:FindFirstChild("Plot" .. alice3:GetAttribute("PlotId"))
 local mango = newPlot.Plants:FindFirstChild("Plant5")
 check(mango ~= nil, "Mango Tree restored")
+local data3 = DataService.Get(alice3)
 check(
-	mango and mango:GetAttribute("Stage") == 3,
-	"Mango Tree kept growing while away (stage " .. tostring(mango and mango:GetAttribute("Stage")) .. ")"
+	data3.Plants["5"].Grown >= 400,
+	"Mango Tree kept growing while away (" .. math.floor(data3.Plants["5"].Grown) .. "s of growth)"
 )
+local oldSunflower = newPlot.Plants:FindFirstChild("Plant6")
+check(oldSunflower and oldSunflower:GetAttribute("Stage") == 4, "old-style saves still load")
+check(data3.Plants["6"].PlantedAt == nil and data3.Plants["6"].Grown ~= nil, "and are converted")
 
 ------------------------------------------------------------------------------
 section("Never stuck without seeds")
 
-local data3 = DataService.Get(alice3)
 table.clear(data3.Seeds)
 data3.Coins = 0
 for key in pairs(data3.Plants) do
@@ -405,7 +731,6 @@ for _ = 1, 30 do
 end
 check(data3.TotalBefriended > 10, "befriended lots of birds over 30 minutes (" .. data3.TotalBefriended .. ")")
 
-Mock.RemovePlayer(bob)
 Mock.RemovePlayer(alice3)
 Mock.Advance(15)
 check(#birdsFolder:GetChildren() == 0, "no birds left once everyone leaves")

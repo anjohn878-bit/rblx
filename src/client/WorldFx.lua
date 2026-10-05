@@ -187,11 +187,14 @@ local function updatePlantLabels(now)
 				status.Text = model:GetAttribute("HasBird") and "🐦 A bird is visiting!" or "🌸 Attracting birds"
 				bar.Visible = false
 			else
-				local plantedAt = model:GetAttribute("PlantedAt") or now
+				-- the server sends how grown it was at a moment and how fast it grows
 				local growTime = model:GetAttribute("GrowTime") or 1
-				local remaining = plantedAt + growTime - now
+				local speed = model:GetAttribute("Speed") or 1
+				local grown = (model:GetAttribute("Grown") or 0)
+					+ (now - (model:GetAttribute("GrownAt") or now)) * speed
+				local remaining = (growTime - grown) / speed
 				status.Text = remaining > 0 and ("⏳ " .. Util.FormatTime(remaining)) or "Almost ready..."
-				fill.Size = UDim2.fromScale(math.clamp(1 - remaining / growTime, 0, 1), 1)
+				fill.Size = UDim2.fromScale(math.clamp(grown / growTime, 0, 1), 1)
 				bar.Visible = true
 			end
 		end
@@ -215,12 +218,42 @@ local function updateBirdLabels(now)
 	end
 end
 
+local function updateNestLabels(now)
+	local root = workspace:FindFirstChild("BirdGarden")
+	local plots = root and root:FindFirstChild("Plots")
+	if not plots then
+		return
+	end
+	for _, plot in ipairs(plots:GetChildren()) do
+		for _, nest in ipairs(plot:GetChildren()) do
+			local base = nest:IsA("Model") and nest:FindFirstChild("NestBase")
+			local gui = base and base:FindFirstChild("NestStatus")
+			local label = gui and gui:FindFirstChild("Status")
+			if label then
+				local def = Birds.Get(base:GetAttribute("Species") or "")
+				if not def then
+					label.Text = "🪺 Empty nest"
+				elseif base:GetAttribute("Waiting") then
+					label.Text = "🥚 Ready! Make room in your aviary"
+				else
+					local remaining = (base:GetAttribute("HatchAt") or now) - now
+					label.Text = "🥚 "
+						.. def.Name
+						.. " egg  •  "
+						.. (remaining > 0 and Util.FormatTime(remaining) or "hatching!")
+				end
+			end
+		end
+	end
+end
+
 local function setupLabels()
 	task.spawn(function()
 		while true do
 			local now = Store.Now()
 			updatePlantLabels(now)
 			updateBirdLabels(now)
+			updateNestLabels(now)
 			task.wait(0.25)
 		end
 	end)
@@ -229,7 +262,7 @@ end
 ------------------------------------------------------------------------------
 -- Floating text
 
-local function showFloatingText(position, text, color)
+function WorldFx.ShowFloatingText(position, text, color)
 	if typeof(position) ~= "Vector3" or type(text) ~= "string" then
 		return
 	end
@@ -273,7 +306,7 @@ function WorldFx.Init()
 	setupTileHighlight()
 	setupBirdAnimation()
 	setupLabels()
-	Net.Effect.OnClientEvent:Connect(showFloatingText)
+	Net.Effect.OnClientEvent:Connect(WorldFx.ShowFloatingText)
 end
 
 return WorldFx

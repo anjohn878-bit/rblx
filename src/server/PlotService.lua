@@ -14,6 +14,7 @@ local Util = require(Shared.Util)
 
 local BirdService = require(script.Parent.BirdService)
 local DataService = require(script.Parent.DataService)
+local PetService = require(script.Parent.PetService)
 
 local PlotService = {}
 
@@ -172,8 +173,7 @@ local function rebuildModel(state)
 	local model = PlantBuilder.Build(state.Seed, state.Stage)
 	model.Name = "Plant" .. state.TileIndex
 	model:SetAttribute("SeedId", state.Seed.Id)
-	model:SetAttribute("PlantedAt", state.PlantedAt)
-	model:SetAttribute("GrowTime", state.GrowTime)
+	model:SetAttribute("GrowTime", state.Seed.GrowTime)
 	model:SetAttribute("Stage", state.Stage)
 	model:SetAttribute("OwnerUserId", state.Owner.UserId)
 	model:SetAttribute("HasBird", hadBird == true)
@@ -183,27 +183,45 @@ local function rebuildModel(state)
 	model:AddTag("BirdGardenPlant")
 	model.Parent = state.Plot.PlantsFolder
 	state.Model = model
+	state.Speed = nil -- make the next growth update refresh the timer attributes
 end
 
--- Moves a plant to its current growth stage. Returns true if it just bloomed.
-local function updateGrowth(state, now)
-	local progress = (now - state.PlantedAt) / state.GrowTime
-	local stage = stageFor(progress)
-	if stage == state.Stage then
-		return false
+-- How fast a player's plants grow (Green Thumb pets make them faster).
+local function growthSpeed(player)
+	return math.max(Config.GrowthSpeed, 0.001) * (1 + PetService.GetPerks(player).Growth)
+end
+
+-- Adds growth since the last update and moves the plant to its current
+-- stage. Returns true if it just bloomed.
+local function updateGrowth(state, now, speed)
+	state.Grown = math.min(state.Seed.GrowTime, state.Grown + math.max(0, now - state.LastUpdate) * speed)
+	state.LastUpdate = now
+	state.Saved.Grown = state.Grown
+	state.Saved.SavedAt = math.floor(now)
+
+	local stage = stageFor(state.Grown / state.Seed.GrowTime)
+	local bloomed = false
+	if stage ~= state.Stage then
+		bloomed = state.Stage ~= 0 and state.Stage < BLOOM_STAGE and stage == BLOOM_STAGE
+		state.Stage = stage
+		rebuildModel(state)
 	end
-	local wasGrowing = state.Stage ~= 0 and state.Stage < BLOOM_STAGE
-	state.Stage = stage
-	rebuildModel(state)
-	return wasGrowing and stage == BLOOM_STAGE
+	if state.Speed ~= speed then
+		-- the client works out the countdown from these
+		state.Speed = speed
+		state.Model:SetAttribute("Grown", state.Grown)
+		state.Model:SetAttribute("GrownAt", now)
+		state.Model:SetAttribute("Speed", speed)
+	end
+	return bloomed
 end
 
-local function createPlant(plot, index, seedId, plantedAt, now)
-	local seed = Seeds.Get(seedId)
+local function createPlant(plot, index, saved, grown, now)
 	local state = {
-		Seed = seed,
-		PlantedAt = plantedAt,
-		GrowTime = seed.GrowTime / math.max(Config.GrowthSpeed, 0.001),
+		Seed = Seeds.Get(saved.Seed),
+		Saved = saved, -- the entry in the player's data, kept up to date
+		Grown = grown,
+		LastUpdate = now,
 		Stage = 0,
 		Owner = plot.Owner,
 		Plot = plot,
@@ -211,7 +229,7 @@ local function createPlant(plot, index, seedId, plantedAt, now)
 		Tile = plot.Tiles[index],
 	}
 	plot.Plants[index] = state
-	updateGrowth(state, now)
+	updateGrowth(state, now, growthSpeed(plot.Owner))
 	setDigPrompt(plot, index)
 	return state
 end
@@ -284,10 +302,20 @@ function PlotService.LoadPlants(player)
 		return
 	end
 	local now = Util.Now()
+	local speed = growthSpeed(player)
 	for key, saved in pairs(data.Plants) do
 		local index = tonumber(key)
 		if index and plot.Tiles[index] and Seeds.Get(saved.Seed) then
-			createPlant(plot, index, saved.Seed, tonumber(saved.PlantedAt) or now, now)
+			-- plants keep growing while you're away
+			local grown
+			if tonumber(saved.Grown) then
+				grown = saved.Grown + math.max(0, now - (tonumber(saved.SavedAt) or now)) * speed
+			else
+				-- saves from before pets existed stored when the seed was planted
+				grown = math.max(0, now - (tonumber(saved.PlantedAt) or now)) * math.max(Config.GrowthSpeed, 0.001)
+				saved.PlantedAt = nil
+			end
+			createPlant(plot, index, saved, grown, now)
 		else
 			data.Plants[key] = nil
 		end
@@ -330,9 +358,9 @@ function PlotService.Plant(player, index)
 		data.Seeds[seedId] = nil
 	end
 	local now = Util.Now()
-	local plantedAt = math.floor(now)
-	data.Plants[tostring(index)] = { Seed = seedId, PlantedAt = plantedAt }
-	local state = createPlant(plot, index, seedId, plantedAt, now)
+	local saved = { Seed = seedId, Grown = 0, SavedAt = math.floor(now) }
+	data.Plants[tostring(index)] = saved
+	local state = createPlant(plot, index, saved, 0, now)
 
 	DataService.EnsureSelection(player)
 	PlotService.UpdatePlantPrompts(player)
@@ -398,8 +426,9 @@ end
 
 function PlotService.Tick(now)
 	for player, plot in pairs(playerPlots) do
+		local speed = growthSpeed(player)
 		for _, state in pairs(plot.Plants) do
-			if updateGrowth(state, now) then
+			if updateGrowth(state, now, speed) then
 				BirdService.ScheduleFirst(state, now)
 				Net.Notify:FireClient(
 					player,

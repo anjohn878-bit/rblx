@@ -2,7 +2,9 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Util = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Util"))
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Pets = require(Shared:WaitForChild("Pets"))
+local Util = require(Shared:WaitForChild("Util"))
 local Store = require(script.Parent.Store)
 local UI = require(script.Parent.UI)
 
@@ -61,7 +63,7 @@ local function sideButton(parent, order, icon, caption, color, onClick)
 	return button
 end
 
--- callbacks = { OnSeeds = fn, OnGarden = fn, OnJournal = fn }
+-- callbacks = { OnSeeds, OnGarden, OnJournal, OnBirds, OnTrade }
 function Hud.Init(screenGui, callbacks)
 	local root = UI.new("Frame", {
 		Name = "Hud",
@@ -77,7 +79,7 @@ function Hud.Init(screenGui, callbacks)
 		Name = "Buttons",
 		AnchorPoint = Vector2.new(0, 0.5),
 		Position = UDim2.new(0, 12, 0.5, 0),
-		Size = UDim2.fromOffset(70, 250),
+		Size = UDim2.fromOffset(70, 400),
 		BackgroundTransparency = 1,
 		Parent = root,
 	}, {
@@ -90,6 +92,8 @@ function Hud.Init(screenGui, callbacks)
 	sideButton(buttons, 1, "🌱", "Seeds", Color3.fromRGB(95, 180, 80), callbacks.OnSeeds)
 	sideButton(buttons, 2, "🏡", "Garden", Color3.fromRGB(205, 150, 80), callbacks.OnGarden)
 	sideButton(buttons, 3, "📖", "Journal", Color3.fromRGB(90, 140, 220), callbacks.OnJournal)
+	sideButton(buttons, 4, "🐦", "Birds", Color3.fromRGB(230, 120, 150), callbacks.OnBirds)
+	sideButton(buttons, 5, "🤝", "Trade", Color3.fromRGB(150, 110, 210), callbacks.OnTrade)
 
 	local lastCoins
 	local function refresh()
@@ -100,7 +104,10 @@ function Hud.Init(screenGui, callbacks)
 			return
 		end
 		coinLabel.Text = Util.FormatNumber(data.Coins)
-		birdLabel.Text = Util.FormatNumber(data.TotalBefriended) .. " befriended"
+		birdLabel.Text = Pets.CountPets(data.Pets or {})
+			.. " birds  •  "
+			.. Pets.CountEquipped(data.Pets or {})
+			.. " out"
 		if lastCoins and data.Coins ~= lastCoins then
 			UI.pop(coinPill)
 		end

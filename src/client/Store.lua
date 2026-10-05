@@ -3,10 +3,12 @@
 local Store = {
 	Data = nil, -- latest snapshot from DataService.Snapshot
 	Shop = nil, -- latest snapshot from ShopService.Snapshot
+	Trade = nil, -- latest trade state from TradeService (Active = false when not trading)
+	TradeRequests = {}, -- incoming requests: { FromUserId, FromName, ExpiresAt }
 }
 
 local changed = Instance.new("BindableEvent")
-Store.Changed = changed.Event -- fires with "Data" or "Shop"
+Store.Changed = changed.Event -- fires with "Data", "Shop", "Trade" or "TradeRequests"
 
 -- Difference between the server's clock and workspace:GetServerTimeNow().
 -- Network delay only ever makes a sample too small, so keep the largest.
@@ -41,6 +43,40 @@ function Store.SetShop(shop)
 	sampleClock(shop.ServerNow)
 	Store.Shop = shop
 	changed:Fire("Shop")
+end
+
+function Store.SetTrade(trade)
+	if type(trade) ~= "table" then
+		return
+	end
+	sampleClock(trade.ServerNow)
+	Store.Trade = trade
+	if trade.Active then
+		-- a trade started, so any request from that player is used up
+		Store.RemoveTradeRequest(trade.PartnerUserId)
+	end
+	changed:Fire("Trade")
+end
+
+function Store.AddTradeRequest(request)
+	if type(request) ~= "table" or type(request.FromUserId) ~= "number" then
+		return
+	end
+	sampleClock(request.ServerNow)
+	Store.RemoveTradeRequest(request.FromUserId, true)
+	table.insert(Store.TradeRequests, request)
+	changed:Fire("TradeRequests")
+end
+
+function Store.RemoveTradeRequest(userId, silent)
+	for i = #Store.TradeRequests, 1, -1 do
+		if Store.TradeRequests[i].FromUserId == userId then
+			table.remove(Store.TradeRequests, i)
+		end
+	end
+	if not silent then
+		changed:Fire("TradeRequests")
+	end
 end
 
 -- Optimistically change the selected seed before the server confirms.

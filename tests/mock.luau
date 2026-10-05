@@ -20,7 +20,9 @@ local Mock = {}
 Mock.Errors = {}
 Mock.Warnings = {}
 Mock.Clock = 0
-local EPOCH = 1790000000
+-- Lune stores number attributes as 32-bit floats (Roblox uses doubles), so
+-- keep simulated unix times small enough to stay precise.
+local EPOCH = 100000
 
 ------------------------------------------------------------------------------
 -- Scheduler (virtual time)
@@ -221,6 +223,13 @@ end)
 
 signalProperty("Instance", "DescendantAdded")
 signalProperty("Instance", "Destroying")
+signalProperty("Instance", "ChildAdded")
+signalProperty("Instance", "ChildRemoved")
+signalProperty("Instance", "AttributeChanged")
+signalProperty("TextBox", "FocusLost")
+roblox.implementMethod("TextBox", "IsFocused", function()
+	return false
+end)
 
 local function pivotOf(model)
 	if model.PrimaryPart then
@@ -278,6 +287,15 @@ end)
 roblox.implementMethod("Workspace", "GetServerTimeNow", function()
 	return EPOCH + Mock.Clock
 end)
+-- no physics here: raycasts never hit, so code falls back to its defaults
+roblox.implementMethod("Workspace", "Raycast", function()
+	return nil
+end)
+
+local RaycastParams = {}
+function RaycastParams.new()
+	return { FilterDescendantsInstances = {} }
+end
 
 -- Services ------------------------------------------------------------------
 
@@ -437,6 +455,15 @@ roblox.implementMethod("Players", "GetPlayers", function(service)
 	return list
 end)
 
+roblox.implementMethod("Players", "GetPlayerByUserId", function(service, userId)
+	for _, child in ipairs(service:GetChildren()) do
+		if child:IsA("Player") and child.UserId == userId then
+			return child
+		end
+	end
+	return nil
+end)
+
 local localPlayer
 Mock.LocalPlayer = function()
 	return localPlayer
@@ -569,6 +596,7 @@ local function makeEnvironment(script, scriptSide)
 		NumberRange = roblox.NumberRange,
 		ColorSequence = roblox.ColorSequence,
 		TweenInfo = TweenInfo,
+		RaycastParams = RaycastParams,
 		Random = Random,
 		DateTime = DateTime,
 		task = task,

@@ -106,6 +106,70 @@ local function decorate(model)
 	end
 end
 
+-- A twiggy nest. Pets sit around it while they keep their egg warm.
+local function buildNest(parent, index, cf)
+	local model = Instance.new("Model")
+	model.Name = "Nest" .. index
+	local twig = Color3.fromRGB(125, 90, 55)
+	local base = newPart(
+		model,
+		"NestBase",
+		Vector3.new(0.5, 4.4, 4.4),
+		cf * CFrame.new(0, 0.25, 0) * CFrame.Angles(0, 0, math.rad(90)),
+		Color3.fromRGB(105, 75, 45),
+		Enum.Material.Wood,
+		{ Shape = Enum.PartType.Cylinder, CanCollide = false }
+	)
+	base:SetAttribute("NestIndex", index)
+	newPart(
+		model,
+		"Straw",
+		Vector3.new(0.2, 3.2, 3.2),
+		cf * CFrame.new(0, 0.55, 0) * CFrame.Angles(0, 0, math.rad(90)),
+		Color3.fromRGB(215, 185, 115),
+		Enum.Material.Grass,
+		{ Shape = Enum.PartType.Cylinder, CanCollide = false, CanQuery = false }
+	)
+	for i = 1, 10 do
+		local angle = i / 10 * math.pi * 2
+		local stick = newPart(
+			model,
+			"Twigs",
+			Vector3.new(1.7, 0.65, 0.65),
+			cf
+				* CFrame.new(math.cos(angle) * 1.85, 0.75, math.sin(angle) * 1.85)
+				* CFrame.Angles(0, -angle + math.pi / 2, 0),
+			twig,
+			Enum.Material.Wood,
+			{ CanCollide = false, CanQuery = false }
+		)
+		local mesh = Instance.new("SpecialMesh")
+		mesh.MeshType = Enum.MeshType.Sphere
+		mesh.Parent = stick
+	end
+
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "NestStatus"
+	gui.Size = UDim2.fromOffset(170, 40)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, 4.2, 0)
+	gui.MaxDistance = 40
+	gui.LightInfluence = 0
+	local label = Instance.new("TextLabel")
+	label.Name = "Status"
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.FredokaOne
+	label.Text = "🪺 Empty nest"
+	label.TextColor3 = Color3.new(1, 1, 1)
+	label.TextStrokeTransparency = 0.3
+	label.TextScaled = true
+	label.Parent = gui
+	gui.Parent = base
+
+	model.Parent = parent
+	return { Model = model, Base = base, CFrame = cf }
+end
+
 ------------------------------------------------------------------------------
 
 local function buildPlot(parent, id, cf)
@@ -178,6 +242,14 @@ local function buildPlot(parent, id, cf)
 	local signLabel = newSignText(board, Enum.NormalId.Back, "Empty Garden")
 	newSignText(board, Enum.NormalId.Front, "🐦 Bird Garden 🐦")
 
+	-- nests for breeding, in the front corners
+	local nests = {}
+	for index = 1, Config.NestCount do
+		local side = index % 2 == 1 and -1 or 1
+		local row = math.floor((index - 1) / 2)
+		nests[index] = buildNest(model, index, cf * CFrame.new(side * 14, 0.4, z - 4.5 - row * 5))
+	end
+
 	model.Parent = parent
 
 	return {
@@ -186,6 +258,7 @@ local function buildPlot(parent, id, cf)
 		CFrame = cf,
 		Tiles = tiles,
 		SignLabel = signLabel,
+		Nests = nests,
 		SpawnCFrame = cf * CFrame.new(0, 3.5, z - 4),
 		FrontPoint = (cf * CFrame.new(0, 0, z)).Position,
 	}

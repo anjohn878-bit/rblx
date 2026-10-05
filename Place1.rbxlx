@@ -1329,12 +1329,408 @@
         </Properties>
         <Item class="ModuleScript" referent="33">
           <Properties>
+            <string name="Name">Actions</string>
+            <string name="Source"><![CDATA[-- Sends a pet action to the server and shows the result as a toast.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Net = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Net"))
+local Notifications = require(script.Parent.Notifications)
+
+local Actions = {}
+
+local busy = false
+
+-- Actions.Pet("Equip", petId) -> success
+function Actions.Pet(action, ...)
+	if busy then
+		return false
+	end
+	busy = true
+	local ok, success, message = pcall(Net.PetAction.InvokeServer, Net.PetAction, action, ...)
+	busy = false
+	if not ok then
+		Notifications.Show("Something went wrong. Try again!", "Error")
+		return false
+	end
+	if type(message) == "string" and message ~= "" then
+		Notifications.Show(message, success and "Success" or "Error")
+	end
+	return success == true
+end
+
+return Actions
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="34">
+          <Properties>
+            <string name="Name">AviaryWindow</string>
+            <string name="Source"><![CDATA[-- The Aviary: every bird you've befriended. Send birds out to roam your
+-- garden (they give perks while they're out), mark favorites, and sell the
+-- ones you don't need.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local BirdBuilder = require(Shared.BirdBuilder)
+local Config = require(Shared.Config)
+local Pets = require(Shared.Pets)
+local Rarities = require(Shared.Rarities)
+local Util = require(Shared.Util)
+local Actions = require(script.Parent.Actions)
+local Store = require(script.Parent.Store)
+local UI = require(script.Parent.UI)
+local Viewport = require(script.Parent.Viewport)
+
+local AviaryWindow = {}
+
+local BIRD_VIEW = Vector3.new(-0.8, 0.35, -1)
+local CONFIRM_TIME = 3
+
+local window, body, headerInfo, perkLabel, bulkRarityButton
+local cards = {} -- [petId] = card
+local bulkRarity = 1
+local openNests -- set in Init
+
+-- A button that needs two presses within a few seconds (for selling).
+local function confirmButton(props, normalText, onConfirm)
+	local armedUntil = 0
+	local button
+	button = UI.button(props, function()
+		if os.clock() < armedUntil then
+			armedUntil = 0
+			button.Text = normalText()
+			onConfirm()
+		else
+			armedUntil = os.clock() + CONFIRM_TIME
+			button.Text = "Sure?"
+			task.delay(CONFIRM_TIME, function()
+				if os.clock() >= armedUntil then
+					button.Text = normalText()
+				end
+			end)
+		end
+	end)
+	button.Text = normalText()
+	return button
+end
+
+local function perkSummary(perks)
+	local parts = {}
+	for _, perkId in ipairs(Pets.PerkOrder) do
+		local info = Pets.Perks[perkId]
+		table.insert(parts, info.Icon .. " +" .. math.floor((perks[perkId] or 0) * 100 + 0.5) .. "%")
+	end
+	return table.concat(parts, "   ")
+end
+
+local function buildCard(petId)
+	local card = {}
+	card.Frame = UI.new("Frame", {
+		Name = petId,
+		BackgroundColor3 = UI.Colors.PanelDark,
+		Parent = body,
+	}, { UI.corner(12) })
+	card.Stroke = UI.stroke(UI.Colors.Wood, 2)
+	card.Stroke.Parent = card.Frame
+
+	card.View = UI.new("ViewportFrame", {
+		Position = UDim2.fromOffset(6, 6),
+		Size = UDim2.new(1, -12, 0, 78),
+		BackgroundColor3 = Color3.fromRGB(200, 230, 245),
+		Parent = card.Frame,
+	}, { UI.corner(10) })
+	card.Badge = UI.label({
+		Text = "",
+		Font = UI.TitleFont,
+		TextColor3 = UI.Colors.White,
+		TextStrokeTransparency = 0.3,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Position = UDim2.fromOffset(10, 8),
+		Size = UDim2.new(1, -20, 0, 18),
+		Parent = card.Frame,
+	})
+	card.Name = UI.label({
+		Font = UI.TitleFont,
+		TextStrokeTransparency = 0.7,
+		Position = UDim2.fromOffset(6, 88),
+		Size = UDim2.new(1, -12, 0, 20),
+		Parent = card.Frame,
+	})
+	card.Kind = UI.label({
+		TextColor3 = UI.Colors.SubText,
+		Position = UDim2.fromOffset(6, 109),
+		Size = UDim2.new(1, -12, 0, 15),
+		Parent = card.Frame,
+	})
+	card.Info = UI.label({
+		TextColor3 = UI.Colors.Text,
+		Position = UDim2.fromOffset(6, 126),
+		Size = UDim2.new(1, -12, 0, 15),
+		Parent = card.Frame,
+	})
+	card.Family = UI.label({
+		TextColor3 = UI.Colors.SubText,
+		Position = UDim2.fromOffset(6, 142),
+		Size = UDim2.new(1, -12, 0, 14),
+		Parent = card.Frame,
+	})
+
+	card.Equip = UI.button({
+		Position = UDim2.new(0, 6, 1, -54),
+		Size = UDim2.new(0.62, -8, 0, 24),
+		Parent = card.Frame,
+	}, function()
+		local pet = Store.Data and Store.Data.Pets[petId]
+		if pet then
+			Actions.Pet(pet.Equipped and "Unequip" or "Equip", petId)
+		end
+	end)
+	card.Favorite = UI.button({
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -6, 1, -54),
+		Size = UDim2.new(0.38, -4, 0, 24),
+		BackgroundColor3 = Color3.fromRGB(240, 130, 160),
+		Parent = card.Frame,
+	}, function()
+		local pet = Store.Data and Store.Data.Pets[petId]
+		if pet then
+			Actions.Pet("Favorite", petId, not pet.Favorite)
+		end
+	end)
+	card.Sell = confirmButton({
+		Position = UDim2.new(0, 6, 1, -27),
+		Size = UDim2.new(1, -12, 0, 22),
+		BackgroundColor3 = UI.Colors.Gold,
+		TextColor3 = UI.Colors.Text,
+		Parent = card.Frame,
+	}, function()
+		return card.SellText or "Sell"
+	end, function()
+		Actions.Pet("Sell", petId)
+	end)
+	cards[petId] = card
+	return card
+end
+
+local function updateCard(card, pet, order, now, perks)
+	local def = Pets.Def(pet)
+	card.Frame.LayoutOrder = order
+	card.Stroke.Color = pet.Equipped and UI.Colors.Green or Rarities.Color(def.Rarity)
+	card.Stroke.Thickness = pet.Equipped and 4 or 2
+
+	local baby = Pets.IsBaby(pet, now)
+	local viewKey = pet.Species .. tostring(pet.Shiny) .. tostring(baby)
+	if card.ViewKey ~= viewKey then
+		card.ViewKey = viewKey
+		Viewport.Show(
+			card.View,
+			BirdBuilder.Build(def, { Shiny = pet.Shiny, Scale = baby and Pets.BabyScale or 1 }),
+			BIRD_VIEW
+		)
+	end
+
+	local badges = {}
+	if pet.Equipped then
+		table.insert(badges, "🌳 OUT")
+	end
+	if pet.Nest then
+		table.insert(badges, "🥚 NEST")
+	end
+	if pet.Shiny then
+		table.insert(badges, "✨")
+	end
+	if pet.Favorite then
+		table.insert(badges, "❤")
+	end
+	card.Badge.Text = table.concat(badges, " ")
+
+	card.Name.Text = (baby and "👶 " or "") .. pet.Name
+	card.Name.TextColor3 = pet.Shiny and Color3.fromRGB(230, 170, 30) or Rarities.Color(def.Rarity)
+	card.Kind.Text = def.Name .. " " .. Pets.StarText(pet.Stars)
+	if baby then
+		card.Info.Text = Pets.PetPerkText(pet, now) .. "  •  grows up in " .. Util.FormatTime(pet.GrowsUpAt - now)
+	else
+		card.Info.Text = Pets.PetPerkText(pet, now) .. " " .. Pets.Perks[def.Perk].Name
+	end
+	if pet.Family then
+		card.Family.Text = "🏡 "
+			.. pet.Family
+			.. " family"
+			.. ((pet.Generation or 0) > 0 and (" • gen " .. pet.Generation) or "")
+	else
+		card.Family.Text = "Wild bird"
+	end
+
+	card.Equip.Text = pet.Nest and "Nesting" or (pet.Equipped and "Put away" or "Send out")
+	card.Equip.BackgroundColor3 = pet.Nest and UI.Colors.Grey or (pet.Equipped and UI.Colors.Wood or UI.Colors.Green)
+	card.Favorite.Text = pet.Favorite and "❤" or "♡"
+	card.SellText = "Sell 🪙 " .. Util.FormatNumber(Pets.SellPrice(pet, now, perks))
+	if card.Sell.Text ~= "Sure?" then
+		card.Sell.Text = card.SellText
+	end
+	local canSell = not pet.Favorite and not pet.Nest
+	card.Sell.BackgroundColor3 = canSell and UI.Colors.Gold or UI.Colors.Grey
+end
+
+local function refresh()
+	if not window or not window.Visible then
+		return
+	end
+	local data = Store.Data
+	if not data then
+		return
+	end
+	local now = Store.Now()
+	local perks = data.Perks or {}
+	local ids = Pets.SortKeys(data.Pets)
+	local seen = {}
+	for order, petId in ipairs(ids) do
+		seen[petId] = true
+		local card = cards[petId] or buildCard(petId)
+		updateCard(card, data.Pets[petId], order, now, perks)
+	end
+	for petId, card in pairs(cards) do
+		if not seen[petId] then
+			card.Frame:Destroy()
+			cards[petId] = nil
+		end
+	end
+
+	headerInfo.Text = #ids
+		.. "/"
+		.. Config.MaxPets
+		.. " birds  •  "
+		.. Pets.CountEquipped(data.Pets)
+		.. "/"
+		.. Config.MaxEquippedPets
+		.. " out"
+	perkLabel.Text = "Perks from birds that are out:  " .. perkSummary(perks)
+	body.Empty.Visible = #ids == 0
+end
+
+function AviaryWindow.Init(screenGui, callbacks)
+	openNests = callbacks.OpenNests
+	window, body, headerInfo = UI.window(screenGui, "🐦 My Birds", function()
+		AviaryWindow.Close()
+	end)
+
+	perkLabel = UI.label({
+		Name = "Perks",
+		Text = "",
+		TextColor3 = UI.Colors.Text,
+		TextWrapped = true,
+		Position = UDim2.new(0, 12, 0, 56),
+		Size = UDim2.new(1, -24, 0, 36),
+		Parent = window,
+	})
+	body.Position = UDim2.new(0, 10, 0, 96)
+	body.Size = UDim2.new(1, -20, 1, -150)
+	UI.new("UIGridLayout", {
+		CellSize = UDim2.fromOffset(140, 214),
+		CellPadding = UDim2.fromOffset(8, 8),
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = body,
+	})
+	UI.new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 8), Parent = body })
+	UI.label({
+		Name = "Empty",
+		Text = "No birds yet! Befriend birds that visit your plants and they'll live here.",
+		TextWrapped = true,
+		TextColor3 = UI.Colors.SubText,
+		LayoutOrder = -1,
+		Visible = false,
+		Parent = body,
+	})
+
+	-- bottom bar: nests and bulk selling
+	local bar = UI.new("Frame", {
+		Name = "Bottom",
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 10, 1, -8),
+		Size = UDim2.new(1, -20, 0, 40),
+		BackgroundTransparency = 1,
+		Parent = window,
+	})
+	UI.button({
+		Text = "🥚 Breed",
+		BackgroundColor3 = Color3.fromRGB(230, 170, 80),
+		Size = UDim2.new(0.28, -4, 1, 0),
+		Parent = bar,
+	}, function()
+		AviaryWindow.Close()
+		openNests(nil)
+	end)
+	bulkRarityButton = UI.button({
+		BackgroundColor3 = UI.Colors.Wood,
+		Position = UDim2.new(0.28, 4, 0, 0),
+		Size = UDim2.new(0.38, -8, 1, 0),
+		Parent = bar,
+	}, function()
+		bulkRarity = bulkRarity % #Rarities.Order + 1
+		bulkRarityButton.Text = "≤ " .. Rarities.Order[bulkRarity] .. " ▾"
+		bulkRarityButton.TextColor3 = Rarities.Color(Rarities.Order[bulkRarity])
+	end)
+	bulkRarityButton.Text = "≤ " .. Rarities.Order[bulkRarity] .. " ▾"
+	bulkRarityButton.TextColor3 = Rarities.Color(Rarities.Order[bulkRarity])
+	confirmButton({
+		BackgroundColor3 = UI.Colors.Gold,
+		TextColor3 = UI.Colors.Text,
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.new(0.34, -4, 1, 0),
+		Parent = bar,
+	}, function()
+		-- spares: birds that aren't out, nesting or favorites
+		return "💰 Sell spares"
+	end, function()
+		Actions.Pet("SellBulk", Rarities.Order[bulkRarity])
+	end)
+
+	Store.Changed:Connect(function(what)
+		if what == "Data" then
+			refresh()
+		end
+	end)
+	-- keep baby timers ticking
+	task.spawn(function()
+		while true do
+			task.wait(1)
+			refresh()
+		end
+	end)
+end
+
+function AviaryWindow.Open()
+	window.Visible = true
+	UI.pop(window)
+	refresh()
+end
+
+function AviaryWindow.Close()
+	window.Visible = false
+end
+
+function AviaryWindow.IsOpen()
+	return window.Visible
+end
+
+return AviaryWindow
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="35">
+          <Properties>
             <string name="Name">Hud</string>
             <string name="Source"><![CDATA[-- Coins, birds befriended and the side buttons.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Util = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Util"))
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Pets = require(Shared:WaitForChild("Pets"))
+local Util = require(Shared:WaitForChild("Util"))
 local Store = require(script.Parent.Store)
 local UI = require(script.Parent.UI)
 
@@ -1393,7 +1789,7 @@ local function sideButton(parent, order, icon, caption, color, onClick)
 	return button
 end
 
--- callbacks = { OnSeeds = fn, OnGarden = fn, OnJournal = fn }
+-- callbacks = { OnSeeds, OnGarden, OnJournal, OnBirds, OnTrade }
 function Hud.Init(screenGui, callbacks)
 	local root = UI.new("Frame", {
 		Name = "Hud",
@@ -1409,7 +1805,7 @@ function Hud.Init(screenGui, callbacks)
 		Name = "Buttons",
 		AnchorPoint = Vector2.new(0, 0.5),
 		Position = UDim2.new(0, 12, 0.5, 0),
-		Size = UDim2.fromOffset(70, 250),
+		Size = UDim2.fromOffset(70, 400),
 		BackgroundTransparency = 1,
 		Parent = root,
 	}, {
@@ -1422,6 +1818,8 @@ function Hud.Init(screenGui, callbacks)
 	sideButton(buttons, 1, "🌱", "Seeds", Color3.fromRGB(95, 180, 80), callbacks.OnSeeds)
 	sideButton(buttons, 2, "🏡", "Garden", Color3.fromRGB(205, 150, 80), callbacks.OnGarden)
 	sideButton(buttons, 3, "📖", "Journal", Color3.fromRGB(90, 140, 220), callbacks.OnJournal)
+	sideButton(buttons, 4, "🐦", "Birds", Color3.fromRGB(230, 120, 150), callbacks.OnBirds)
+	sideButton(buttons, 5, "🤝", "Trade", Color3.fromRGB(150, 110, 210), callbacks.OnTrade)
 
 	local lastCoins
 	local function refresh()
@@ -1432,7 +1830,10 @@ function Hud.Init(screenGui, callbacks)
 			return
 		end
 		coinLabel.Text = Util.FormatNumber(data.Coins)
-		birdLabel.Text = Util.FormatNumber(data.TotalBefriended) .. " befriended"
+		birdLabel.Text = Pets.CountPets(data.Pets or {})
+			.. " birds  •  "
+			.. Pets.CountEquipped(data.Pets or {})
+			.. " out"
 		if lastCoins and data.Coins ~= lastCoins then
 			UI.pop(coinPill)
 		end
@@ -1450,7 +1851,7 @@ return Hud
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="34">
+        <Item class="ModuleScript" referent="36">
           <Properties>
             <string name="Name">JournalWindow</string>
             <string name="Source"><![CDATA[-- The Bird Journal: every species, which ones you've befriended, and hints
@@ -1613,7 +2014,7 @@ return JournalWindow
 ]]></string>
           </Properties>
         </Item>
-        <Item class="LocalScript" referent="35">
+        <Item class="LocalScript" referent="37">
           <Properties>
             <string name="Name">Main</string>
             <string name="Source"><![CDATA[-- Grow a Bird Garden: client entry point. Builds the UI and wires it to the server.
@@ -1624,12 +2025,16 @@ local StarterGui = game:GetService("StarterGui")
 
 local Net = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Net"))
 
+local AviaryWindow = require(script.Parent.AviaryWindow)
 local Hud = require(script.Parent.Hud)
 local JournalWindow = require(script.Parent.JournalWindow)
+local NestWindow = require(script.Parent.NestWindow)
 local Notifications = require(script.Parent.Notifications)
+local PetRenderer = require(script.Parent.PetRenderer)
 local SeedBag = require(script.Parent.SeedBag)
 local ShopWindow = require(script.Parent.ShopWindow)
 local Store = require(script.Parent.Store)
+local TradeWindow = require(script.Parent.TradeWindow)
 local WorldFx = require(script.Parent.WorldFx)
 
 local player = Players.LocalPlayer
@@ -1648,43 +2053,78 @@ screenGui.Parent = player:WaitForChild("PlayerGui")
 Notifications.Init(screenGui)
 ShopWindow.Init(screenGui)
 JournalWindow.Init(screenGui)
+TradeWindow.Init(screenGui)
+NestWindow.Init(screenGui)
+
+local windows = { ShopWindow, JournalWindow, AviaryWindow, NestWindow, TradeWindow }
+
+-- Only one window at a time.
+local function show(target, ...)
+	for _, window in ipairs(windows) do
+		if window ~= target then
+			window.Close()
+		end
+	end
+	target.Open(...)
+end
+
+local function toggle(target)
+	if target.IsOpen() then
+		target.Close()
+	else
+		show(target)
+	end
+end
 
 local function openShop()
-	JournalWindow.Close()
-	ShopWindow.Open()
+	show(ShopWindow)
 end
 
-local function toggleShop()
-	if ShopWindow.IsOpen() then
-		ShopWindow.Close()
-	else
-		openShop()
-	end
+local function openNests(nestIndex)
+	show(NestWindow, nestIndex)
 end
 
-local function toggleJournal()
-	if JournalWindow.IsOpen() then
-		JournalWindow.Close()
-	else
-		ShopWindow.Close()
-		JournalWindow.Open()
-	end
-end
+AviaryWindow.Init(screenGui, { OpenNests = openNests })
 
 Hud.Init(screenGui, {
-	OnSeeds = toggleShop,
+	OnSeeds = function()
+		toggle(ShopWindow)
+	end,
 	OnGarden = function()
 		Net.Teleport:FireServer("Garden")
 	end,
-	OnJournal = toggleJournal,
+	OnJournal = function()
+		toggle(JournalWindow)
+	end,
+	OnBirds = function()
+		toggle(AviaryWindow)
+	end,
+	OnTrade = function()
+		toggle(TradeWindow)
+	end,
 })
 SeedBag.Init(screenGui, openShop)
 WorldFx.Init()
+PetRenderer.Init()
 
 Net.DataUpdated.OnClientEvent:Connect(Store.SetData)
 Net.ShopUpdated.OnClientEvent:Connect(Store.SetShop)
 Net.Notify.OnClientEvent:Connect(Notifications.Show)
 Net.OpenShop.OnClientEvent:Connect(openShop)
+Net.OpenNest.OnClientEvent:Connect(openNests)
+Net.TradeState.OnClientEvent:Connect(function(trade)
+	Store.SetTrade(trade)
+	if type(trade) == "table" and trade.Active and not TradeWindow.IsOpen() then
+		show(TradeWindow)
+	end
+end)
+Net.TradeIncoming.OnClientEvent:Connect(Store.AddTradeRequest)
+Net.PetEvent.OnClientEvent:Connect(function(markerName, text, color)
+	local position = PetRenderer.GetPosition(markerName)
+	if position then
+		WorldFx.ShowFloatingText(position, text, color)
+	end
+end)
 
 task.spawn(function()
 	local ok, data = pcall(function()
@@ -1705,7 +2145,366 @@ end)
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="36">
+        <Item class="ModuleScript" referent="38">
+          <Properties>
+            <string name="Name">NestWindow</string>
+            <string name="Source"><![CDATA[-- Breeding: pick two grown-up birds of the same kind, put them in a nest and
+-- wait for the egg to hatch. Also lists the families you've started.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Birds = require(Shared.Birds)
+local Config = require(Shared.Config)
+local Pets = require(Shared.Pets)
+local Rarities = require(Shared.Rarities)
+local Util = require(Shared.Util)
+local Actions = require(script.Parent.Actions)
+local Store = require(script.Parent.Store)
+local UI = require(script.Parent.UI)
+
+local NestWindow = {}
+
+local window, body, headerInfo
+local nestRows = {}
+local pickGrid, startButton, familyLabel, pickHint
+local selected = {}
+local targetNest
+
+local function section(order, text)
+	return UI.label({
+		LayoutOrder = order,
+		Text = text,
+		Font = UI.TitleFont,
+		TextColor3 = UI.Colors.Wood,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.new(1, -8, 0, 24),
+		Parent = body,
+	})
+end
+
+local function selectedSpecies(data)
+	local first = selected[1] and data.Pets[selected[1]]
+	return first and first.Species
+end
+
+local function togglePick(petId)
+	local data = Store.Data
+	local pet = data and data.Pets[petId]
+	if not pet then
+		return
+	end
+	local index = table.find(selected, petId)
+	if index then
+		table.remove(selected, index)
+	elseif selectedSpecies(data) and selectedSpecies(data) ~= pet.Species then
+		selected = { petId }
+	elseif #selected >= 2 then
+		selected[2] = petId
+	else
+		table.insert(selected, petId)
+	end
+	NestWindow.Refresh()
+end
+
+-- Adult birds that can breed, only kinds you have at least two of.
+local function candidates(data, now)
+	local bySpecies = {}
+	for id, pet in pairs(data.Pets) do
+		if not pet.Nest and not Pets.IsBaby(pet, now) then
+			bySpecies[pet.Species] = bySpecies[pet.Species] or {}
+			table.insert(bySpecies[pet.Species], id)
+		end
+	end
+	local list = {}
+	for species, ids in pairs(bySpecies) do
+		if #ids >= 2 then
+			for _, id in ipairs(ids) do
+				table.insert(list, { Id = id, Pet = data.Pets[id], Def = Birds.Get(species) })
+			end
+		end
+	end
+	table.sort(list, function(a, b)
+		local ra, rb = Rarities.Rank(a.Def.Rarity), Rarities.Rank(b.Def.Rarity)
+		if ra ~= rb then
+			return ra > rb
+		elseif a.Pet.Species ~= b.Pet.Species then
+			return a.Pet.Species < b.Pet.Species
+		elseif (a.Pet.Stars or 1) ~= (b.Pet.Stars or 1) then
+			return (a.Pet.Stars or 1) > (b.Pet.Stars or 1)
+		end
+		return a.Id < b.Id
+	end)
+	return list
+end
+
+local function familySummary(data)
+	local families = {}
+	local order = {}
+	for _, pet in pairs(data.Pets) do
+		if pet.Family then
+			local family = families[pet.Family]
+			if not family then
+				family = { Count = 0, Generation = 0, Kinds = {} }
+				families[pet.Family] = family
+				table.insert(order, pet.Family)
+			end
+			family.Count += 1
+			family.Generation = math.max(family.Generation, pet.Generation or 0)
+			family.Kinds[Birds.Get(pet.Species).Name] = true
+		end
+	end
+	if #order == 0 then
+		return "No families yet. Hatch an egg to start one!"
+	end
+	table.sort(order)
+	local lines = {}
+	for _, name in ipairs(order) do
+		local family = families[name]
+		local kinds = {}
+		for kind in pairs(family.Kinds) do
+			table.insert(kinds, kind)
+		end
+		table.sort(kinds)
+		table.insert(
+			lines,
+			"🏡 The "
+				.. name
+				.. " family: "
+				.. family.Count
+				.. " birds ("
+				.. table.concat(kinds, ", ")
+				.. "), "
+				.. (family.Generation + 1)
+				.. " generations"
+		)
+	end
+	return table.concat(lines, "\n")
+end
+
+local function refreshNests(data, now)
+	local busy = 0
+	for index, row in ipairs(nestRows) do
+		local entry = data.Nests[tostring(index)]
+		if entry then
+			busy += 1
+			local a, b = data.Pets[entry.ParentA], data.Pets[entry.ParentB]
+			local parents = (a and a.Name or "?") .. " & " .. (b and b.Name or "?")
+			local remaining = entry.HatchAt - now
+			local timer = entry.Waiting and "ready! Make room in your aviary"
+				or (remaining > 0 and ("hatches in " .. Util.FormatTime(remaining)) or "hatching...")
+			row.Label.Text = "Nest "
+				.. index
+				.. ":  🥚 "
+				.. Birds.Get(entry.Species).Name
+				.. " egg from "
+				.. parents
+				.. "  •  "
+				.. timer
+			row.Cancel.Visible = true
+		else
+			row.Label.Text = "Nest " .. index .. ":  🪺 empty" .. (targetNest == index and "  (you're here)" or "")
+			row.Cancel.Visible = false
+		end
+	end
+	headerInfo.Text = busy .. "/" .. Config.NestCount .. " nests busy"
+	return busy
+end
+
+function NestWindow.Refresh()
+	if not window or not window.Visible then
+		return
+	end
+	local data = Store.Data
+	if not data then
+		return
+	end
+	local now = Store.Now()
+	local busy = refreshNests(data, now)
+
+	-- candidates
+	for i = #selected, 1, -1 do
+		local pet = data.Pets[selected[i]]
+		if not pet or pet.Nest or Pets.IsBaby(pet, now) then
+			table.remove(selected, i)
+		end
+	end
+	for _, child in ipairs(pickGrid:GetChildren()) do
+		if child:IsA("TextButton") then
+			child:Destroy()
+		end
+	end
+	local list = candidates(data, now)
+	for order, entry in ipairs(list) do
+		local isSelected = table.find(selected, entry.Id) ~= nil
+		local button = UI.button({
+			LayoutOrder = order,
+			Text = "",
+			BackgroundColor3 = isSelected and Color3.fromRGB(210, 245, 190) or UI.Colors.Panel,
+			Parent = pickGrid,
+		}, function()
+			togglePick(entry.Id)
+		end)
+		UI.stroke(isSelected and UI.Colors.Green or Rarities.Color(entry.Def.Rarity), isSelected and 4 or 2).Parent =
+			button
+		UI.label({
+			Text = (entry.Pet.Shiny and "✨" or "") .. entry.Pet.Name .. " " .. Pets.StarText(entry.Pet.Stars),
+			Font = UI.TitleFont,
+			TextColor3 = Rarities.Color(entry.Def.Rarity),
+			TextStrokeTransparency = 0.7,
+			Position = UDim2.fromOffset(6, 4),
+			Size = UDim2.new(1, -12, 0, 22),
+			Parent = button,
+		})
+		UI.label({
+			Text = entry.Def.Name .. (entry.Pet.Equipped and "  •  out" or ""),
+			TextColor3 = UI.Colors.SubText,
+			Position = UDim2.fromOffset(6, 28),
+			Size = UDim2.new(1, -12, 0, 16),
+			Parent = button,
+		})
+	end
+	pickHint.Text = #list == 0
+			and "You need two grown-up birds of the same kind. Befriend more birds, or wait for babies to grow up!"
+		or "Babies get their parents' stars (sometimes one more ⭐). Shiny parents often have shiny babies!"
+
+	local species = selectedSpecies(data)
+	if #selected == 2 and species then
+		startButton.Text = "🥚 Start a nest  (hatches in " .. Util.FormatTime(Pets.BreedTime(species)) .. ")"
+		startButton.BackgroundColor3 = busy < Config.NestCount and UI.Colors.Green or UI.Colors.Grey
+	else
+		startButton.Text = "Pick two birds of the same kind"
+		startButton.BackgroundColor3 = UI.Colors.Grey
+	end
+
+	familyLabel.Text = familySummary(data)
+end
+
+function NestWindow.Init(screenGui)
+	window, body, headerInfo = UI.window(screenGui, "🥚 Nests & Families", function()
+		NestWindow.Close()
+	end)
+	UI.new("UIListLayout", {
+		Padding = UDim.new(0, 6),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		Parent = body,
+	})
+	UI.new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 8), Parent = body })
+
+	section(1, "Your nests")
+	for index = 1, Config.NestCount do
+		local row = UI.new("Frame", {
+			LayoutOrder = 1 + index,
+			Size = UDim2.new(1, -8, 0, 40),
+			BackgroundColor3 = UI.Colors.PanelDark,
+			Parent = body,
+		}, { UI.corner(10) })
+		local label = UI.label({
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextWrapped = true,
+			Position = UDim2.fromOffset(10, 4),
+			Size = UDim2.new(1, -110, 1, -8),
+			Parent = row,
+		})
+		local cancel = UI.button({
+			Text = "Cancel",
+			BackgroundColor3 = UI.Colors.Red,
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -6, 0.5, 0),
+			Size = UDim2.fromOffset(90, 30),
+			Parent = row,
+		}, function()
+			Actions.Pet("CancelNest", index)
+		end)
+		nestRows[index] = { Label = label, Cancel = cancel }
+	end
+
+	section(10, "Pick two birds of the same kind")
+	pickHint = UI.label({
+		LayoutOrder = 11,
+		TextWrapped = true,
+		TextColor3 = UI.Colors.SubText,
+		Size = UDim2.new(1, -8, 0, 32),
+		Parent = body,
+	})
+	pickGrid = UI.new("Frame", {
+		LayoutOrder = 12,
+		Size = UDim2.new(1, -8, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		Parent = body,
+	}, {
+		UI.new("UIGridLayout", {
+			CellSize = UDim2.fromOffset(160, 50),
+			CellPadding = UDim2.fromOffset(6, 6),
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+	})
+	startButton = UI.button({
+		LayoutOrder = 13,
+		Size = UDim2.new(1, -8, 0, 44),
+		Parent = body,
+	}, function()
+		if #selected == 2 and Actions.Pet("Breed", selected[1], selected[2], targetNest) then
+			selected = {}
+			NestWindow.Refresh()
+		end
+	end)
+
+	section(20, "Families")
+	familyLabel = UI.label({
+		LayoutOrder = 21,
+		TextWrapped = true,
+		TextScaled = false,
+		TextSize = 16,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Size = UDim2.new(1, -8, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Parent = body,
+	})
+
+	Store.Changed:Connect(function(what)
+		if what == "Data" then
+			NestWindow.Refresh()
+		end
+	end)
+	task.spawn(function()
+		while true do
+			task.wait(1)
+			-- only the nest timers change every second (rebuilding the
+			-- bird buttons here would eat clicks)
+			local data = Store.Data
+			if window.Visible and data then
+				refreshNests(data, Store.Now())
+			end
+		end
+	end)
+end
+
+-- nestIndex: the nest the player walked up to (or nil from the aviary)
+function NestWindow.Open(nestIndex)
+	targetNest = tonumber(nestIndex)
+	window.Visible = true
+	UI.pop(window)
+	NestWindow.Refresh()
+end
+
+function NestWindow.Close()
+	window.Visible = false
+end
+
+function NestWindow.IsOpen()
+	return window.Visible
+end
+
+return NestWindow
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="39">
           <Properties>
             <string name="Name">Notifications</string>
             <string name="Source"><![CDATA[-- Toast messages that slide in at the top of the screen.
@@ -1808,7 +2607,450 @@ return Notifications
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="37">
+        <Item class="ModuleScript" referent="40">
+          <Properties>
+            <string name="Name">PetRenderer</string>
+            <string name="Source"><![CDATA[-- Draws everyone's pet birds. The server publishes a marker for every pet
+-- that is out in a garden (or sitting on a nest); each client builds the
+-- model locally and makes it hop around, peck, flutter up onto blooming
+-- plants and, for babies, tag along behind their parents.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local BirdBuilder = require(Shared.BirdBuilder)
+local Birds = require(Shared.Birds)
+local Pets = require(Shared.Pets)
+local Rarities = require(Shared.Rarities)
+
+local PetRenderer = {}
+
+local HOP_SPEED = 5 -- studs per second
+local HOP_RATE = 2.6 -- hops per second
+local HOP_HEIGHT = 0.55
+local FLY_SPEED = 14
+local TURN_SPEED = 8
+
+local rng = Random.new()
+local markers
+local container
+local pets = {} -- [markerName] = state
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Include
+
+------------------------------------------------------------------------------
+-- Garden helpers
+
+local function plotFor(plotId)
+	local root = workspace:FindFirstChild("BirdGarden")
+	local plots = root and root:FindFirstChild("Plots")
+	return plots and plots:FindFirstChild("Plot" .. tostring(plotId))
+end
+
+local function groundHeight(plot, position)
+	rayParams.FilterDescendantsInstances = { plot }
+	local result = workspace:Raycast(position + Vector3.new(0, 30, 0), Vector3.new(0, -60, 0), rayParams)
+	if result then
+		return result.Position.Y
+	end
+	local ground = plot:FindFirstChild("Ground")
+	return ground and (ground.CFrame.Position.Y + ground.Size.Y / 2) or position.Y
+end
+
+local function randomPoint(plot)
+	local ground = plot:FindFirstChild("Ground")
+	if not ground then
+		return nil
+	end
+	local half = ground.Size / 2
+	local offset =
+		Vector3.new(rng:NextNumber(-half.X + 2.5, half.X - 2.5), 0, rng:NextNumber(-half.Z + 2.5, half.Z - 2.5))
+	local point = ground.CFrame:PointToWorldSpace(offset)
+	return Vector3.new(point.X, groundHeight(plot, point), point.Z)
+end
+
+local function randomPerch(plot)
+	local plants = plot:FindFirstChild("Plants")
+	if not plants then
+		return nil
+	end
+	local options = {}
+	for _, plant in ipairs(plants:GetChildren()) do
+		local root = plant.PrimaryPart
+		local perch = root and root:FindFirstChild("Perch")
+		if perch and plant:GetAttribute("Stage") == 4 and not plant:GetAttribute("HasBird") then
+			table.insert(options, root.CFrame * perch.Position)
+		end
+	end
+	if #options == 0 then
+		return nil
+	end
+	return options[rng:NextInteger(1, #options)]
+end
+
+local function nestSeat(plot, marker)
+	local nest = plot:FindFirstChild("Nest" .. tostring(marker:GetAttribute("NestIndex")))
+	local base = nest and nest:FindFirstChild("NestBase")
+	if not base then
+		return nil
+	end
+	-- the two parents sit on opposite sides of the egg
+	local side = 1
+	for name, other in pairs(pets) do
+		if
+			other.Marker ~= marker
+			and other.Marker:GetAttribute("Mode") == "Nest"
+			and other.Marker:GetAttribute("NestIndex") == marker:GetAttribute("NestIndex")
+			and other.Marker:GetAttribute("OwnerUserId") == marker:GetAttribute("OwnerUserId")
+			and name < marker.Name
+		then
+			side = -1
+		end
+	end
+	local center = base.CFrame.Position
+	return center + Vector3.new(side * 1.6, 0.75, 0), center
+end
+
+------------------------------------------------------------------------------
+-- Models
+
+local function yawToward(direction)
+	return math.atan2(-direction.X, -direction.Z)
+end
+
+local function lerpAngle(a, b, alpha)
+	local difference = (b - a + math.pi) % (math.pi * 2) - math.pi
+	return a + difference * alpha
+end
+
+local function addNameTag(model, marker)
+	local def = Birds.Get(marker:GetAttribute("Species"))
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "PetTag"
+	gui.Size = UDim2.fromOffset(160, 36)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, 1.8 * (def.Look.Size or 1), 0)
+	gui.MaxDistance = 30
+	gui.LightInfluence = 0
+	local label = Instance.new("TextLabel")
+	label.Name = "Label"
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.FredokaOne
+	label.Text = (marker:GetAttribute("Baby") and "👶 " or "")
+		.. (marker:GetAttribute("DisplayName") or def.Name)
+		.. " "
+		.. Pets.StarText(marker:GetAttribute("Stars"))
+	label.TextColor3 = marker:GetAttribute("Shiny") and Color3.fromRGB(255, 230, 120) or Rarities.Color(def.Rarity)
+	label.TextStrokeTransparency = 0.3
+	label.TextScaled = true
+	label.Parent = gui
+	gui.Parent = model.PrimaryPart
+end
+
+local function buildModel(state)
+	if state.Model then
+		state.Model:Destroy()
+	end
+	local marker = state.Marker
+	local def = Birds.Get(marker:GetAttribute("Species"))
+	if not def then
+		return
+	end
+	local model = BirdBuilder.Build(def, {
+		Shiny = marker:GetAttribute("Shiny"),
+		Scale = marker:GetAttribute("Baby") and Pets.BabyScale or 1,
+	})
+	model.Name = marker.Name
+	model:SetAttribute("Flying", false)
+	addNameTag(model, marker)
+	state.Model = model
+	state.StandHeight = model:GetAttribute("StandHeight")
+	state.Hover = model:GetAttribute("Hover")
+	state.Key = table.concat({
+		marker:GetAttribute("Species"),
+		tostring(marker:GetAttribute("Shiny")),
+		tostring(marker:GetAttribute("Baby")),
+		tostring(marker:GetAttribute("Stars")),
+		tostring(marker:GetAttribute("DisplayName")),
+	}, "|")
+	model.Parent = container
+	model:AddTag("BirdGardenBird")
+end
+
+------------------------------------------------------------------------------
+-- Behaviour
+
+local function startIdle(state, now)
+	state.Action = "Idle"
+	state.ActionEnd = now + rng:NextNumber(1.2, 3.5)
+end
+
+local function startHop(state, target)
+	state.Action = "Hop"
+	state.Target = target
+end
+
+local function startFlight(state, target, perchAfter)
+	state.Action = "Fly"
+	state.From = state.Position
+	state.Target = target
+	state.FlightTime = 0
+	state.FlightDuration = math.max(0.6, (target - state.Position).Magnitude / FLY_SPEED)
+	state.PerchAfter = perchAfter
+end
+
+local function chooseNext(state, now)
+	local marker = state.Marker
+	local follow = marker:GetAttribute("Follow")
+	local leader = follow ~= "" and pets[follow]
+	if leader and leader.Position and leader.Action ~= "Fly" and leader.Action ~= "Perch" then
+		-- babies stay close to mum or dad
+		local offset = Vector3.new(rng:NextNumber(-2, 2), 0, rng:NextNumber(-2, 2))
+		local target = leader.Position + offset
+		if (target - state.Position).Magnitude > 2.5 then
+			startHop(state, Vector3.new(target.X, groundHeight(state.Plot, target), target.Z))
+			return
+		end
+		startIdle(state, now)
+		return
+	end
+
+	local roll = rng:NextNumber()
+	if roll < 0.2 and not marker:GetAttribute("Baby") then
+		local perch = randomPerch(state.Plot)
+		if perch then
+			startFlight(state, perch, true)
+			return
+		end
+	end
+	if roll < 0.75 then
+		local point = randomPoint(state.Plot)
+		if point then
+			if (point - state.Position).Magnitude > 16 and not marker:GetAttribute("Baby") then
+				startFlight(state, point, false)
+			else
+				startHop(state, point)
+			end
+			return
+		end
+	end
+	startIdle(state, now)
+end
+
+local function placeModel(state, heightOffset)
+	local body = state.Model and state.Model.PrimaryPart
+	if body then
+		local position = state.Position + Vector3.new(0, state.StandHeight + (heightOffset or 0), 0)
+		body.CFrame = CFrame.new(position) * CFrame.Angles(0, state.Yaw, 0)
+	end
+end
+
+local function faceToward(state, direction, dt)
+	if direction.Magnitude > 0.05 then
+		state.Yaw = lerpAngle(state.Yaw, yawToward(direction), math.min(1, dt * TURN_SPEED))
+	end
+end
+
+local function updatePet(state, dt, now)
+	local marker = state.Marker
+	if not state.Plot or not state.Plot.Parent then
+		state.Plot = plotFor(marker:GetAttribute("PlotId"))
+		if not state.Plot then
+			return
+		end
+	end
+	if not state.Position then
+		local spawnAt = marker:GetAttribute("SpawnAt")
+		if typeof(spawnAt) == "Vector3" then
+			state.Position = spawnAt - Vector3.new(0, state.StandHeight, 0)
+			local landing = randomPoint(state.Plot)
+			if landing then
+				startFlight(state, landing, false)
+			end
+		else
+			state.Position = randomPoint(state.Plot)
+			if not state.Position then
+				return
+			end
+			startIdle(state, now)
+		end
+	end
+	local model = state.Model
+	if not model then
+		return
+	end
+
+	if marker:GetAttribute("Mode") == "Nest" then
+		local seat, center = nestSeat(state.Plot, marker)
+		if seat then
+			state.Position = seat
+			state.Action = "Nest"
+			faceToward(state, center - seat, dt)
+			model:SetAttribute("Flying", false)
+			placeModel(state, math.sin(now * 2 + seat.X) * 0.04)
+			return
+		end
+	elseif state.Action == "Nest" then
+		-- just left the nest
+		startIdle(state, now)
+	end
+
+	local hoverHeight = 0
+	if state.Action == "Idle" then
+		model:SetAttribute("Flying", false)
+		if now >= state.ActionEnd then
+			chooseNext(state, now)
+		end
+	elseif state.Action == "Hop" then
+		model:SetAttribute("Flying", false)
+		local toTarget = state.Target - state.Position
+		local flat = Vector3.new(toTarget.X, 0, toTarget.Z)
+		local speed = HOP_SPEED * (marker:GetAttribute("Baby") and 0.8 or 1)
+		if flat.Magnitude <= speed * dt then
+			state.Position = state.Target
+			startIdle(state, now)
+		else
+			local step = flat.Unit * speed * dt
+			local nextPosition = state.Position + step
+			state.Position = Vector3.new(nextPosition.X, state.Target.Y, nextPosition.Z)
+			faceToward(state, flat, dt)
+			state.HopPhase = (state.HopPhase or 0) + dt * HOP_RATE * math.pi
+			hoverHeight = math.abs(math.sin(state.HopPhase)) * HOP_HEIGHT
+		end
+	elseif state.Action == "Fly" then
+		model:SetAttribute("Flying", true)
+		state.FlightTime += dt
+		local alpha = math.min(1, state.FlightTime / state.FlightDuration)
+		local eased = alpha * alpha * (3 - 2 * alpha)
+		local path = state.Target - state.From
+		local arc = math.sin(alpha * math.pi) * math.min(8, 2 + path.Magnitude * 0.3)
+		state.Position = state.From + path * eased + Vector3.new(0, arc, 0)
+		faceToward(state, Vector3.new(path.X, 0, path.Z), dt)
+		if alpha >= 1 then
+			state.Position = state.Target
+			if state.PerchAfter then
+				state.Action = "Perch"
+				state.ActionEnd = now + rng:NextNumber(4, 9)
+			else
+				startIdle(state, now)
+			end
+		end
+	elseif state.Action == "Perch" then
+		model:SetAttribute("Flying", false)
+		if now >= state.ActionEnd then
+			local landing = randomPoint(state.Plot)
+			if landing then
+				startFlight(state, landing, false)
+			else
+				startIdle(state, now)
+			end
+		end
+	end
+	if state.Hover then
+		hoverHeight += 1.2 + math.sin(now * 3) * 0.15
+	end
+	placeModel(state, hoverHeight)
+end
+
+------------------------------------------------------------------------------
+-- Markers
+
+local function addMarker(marker)
+	if pets[marker.Name] then
+		return
+	end
+	local state = { Marker = marker, Yaw = rng:NextNumber(-math.pi, math.pi) }
+	pets[marker.Name] = state
+	buildModel(state)
+	state.Connection = marker.AttributeChanged:Connect(function(attribute)
+		if
+			attribute == "Species"
+			or attribute == "Shiny"
+			or attribute == "Baby"
+			or attribute == "Stars"
+			or attribute == "DisplayName"
+		then
+			buildModel(state)
+		elseif attribute == "PlotId" then
+			state.Plot = nil
+			state.Position = nil
+		end
+	end)
+end
+
+local function removePet(name)
+	local state = pets[name]
+	if not state then
+		return
+	end
+	pets[name] = nil
+	if state.Connection then
+		state.Connection:Disconnect()
+	end
+	if state.Model then
+		state.Model:Destroy()
+	end
+end
+
+local function removeMarker(marker)
+	local state = pets[marker.Name]
+	if state and state.Marker == marker then
+		removePet(marker.Name)
+	end
+end
+
+-- World position above a pet's head (for floating text), if it's drawn.
+function PetRenderer.GetPosition(markerName)
+	local state = pets[markerName]
+	if state and state.Position and state.Model then
+		return state.Position + Vector3.new(0, state.StandHeight + 2, 0)
+	end
+	return nil
+end
+
+function PetRenderer.Init()
+	container = Instance.new("Folder")
+	container.Name = "BirdGardenPetModels"
+	container.Parent = workspace
+
+	markers = ReplicatedStorage:WaitForChild("BirdGardenPets")
+	for _, marker in ipairs(markers:GetChildren()) do
+		addMarker(marker)
+	end
+	markers.ChildAdded:Connect(addMarker)
+	markers.ChildRemoved:Connect(removeMarker)
+
+	RunService.RenderStepped:Connect(function(dt)
+		local now = os.clock()
+		dt = math.min(dt, 0.1)
+		for name, state in pairs(pets) do
+			-- markers can disappear between ChildRemoved and the next frame
+			local alive, parent = pcall(function()
+				return state.Marker.Parent
+			end)
+			if not alive or parent ~= markers then
+				removePet(name)
+				continue
+			end
+			local ok, err = pcall(updatePet, state, dt, now)
+			if not ok then
+				if not state.Warned then
+					state.Warned = true
+					warn("[BirdGarden] Pet update failed:", err)
+				end
+				state.Action = "Idle"
+				state.ActionEnd = now + 1
+			end
+		end
+	end)
+end
+
+return PetRenderer
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="41">
           <Properties>
             <string name="Name">SeedBag</string>
             <string name="Source"><![CDATA[-- The seed hotbar at the bottom of the screen. Pick which seed to plant.
@@ -2001,7 +3243,7 @@ return SeedBag
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="38">
+        <Item class="ModuleScript" referent="42">
           <Properties>
             <string name="Name">ShopWindow</string>
             <string name="Source"><![CDATA[-- The Seed Shop window: lists every seed with its stock, grow time and the
@@ -2204,7 +3446,7 @@ return ShopWindow
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="39">
+        <Item class="ModuleScript" referent="43">
           <Properties>
             <string name="Name">Store</string>
             <string name="Source"><![CDATA[-- Client-side copy of the player's state and the shop stock.
@@ -2212,10 +3454,12 @@ return ShopWindow
 local Store = {
 	Data = nil, -- latest snapshot from DataService.Snapshot
 	Shop = nil, -- latest snapshot from ShopService.Snapshot
+	Trade = nil, -- latest trade state from TradeService (Active = false when not trading)
+	TradeRequests = {}, -- incoming requests: { FromUserId, FromName, ExpiresAt }
 }
 
 local changed = Instance.new("BindableEvent")
-Store.Changed = changed.Event -- fires with "Data" or "Shop"
+Store.Changed = changed.Event -- fires with "Data", "Shop", "Trade" or "TradeRequests"
 
 -- Difference between the server's clock and workspace:GetServerTimeNow().
 -- Network delay only ever makes a sample too small, so keep the largest.
@@ -2252,6 +3496,40 @@ function Store.SetShop(shop)
 	changed:Fire("Shop")
 end
 
+function Store.SetTrade(trade)
+	if type(trade) ~= "table" then
+		return
+	end
+	sampleClock(trade.ServerNow)
+	Store.Trade = trade
+	if trade.Active then
+		-- a trade started, so any request from that player is used up
+		Store.RemoveTradeRequest(trade.PartnerUserId)
+	end
+	changed:Fire("Trade")
+end
+
+function Store.AddTradeRequest(request)
+	if type(request) ~= "table" or type(request.FromUserId) ~= "number" then
+		return
+	end
+	sampleClock(request.ServerNow)
+	Store.RemoveTradeRequest(request.FromUserId, true)
+	table.insert(Store.TradeRequests, request)
+	changed:Fire("TradeRequests")
+end
+
+function Store.RemoveTradeRequest(userId, silent)
+	for i = #Store.TradeRequests, 1, -1 do
+		if Store.TradeRequests[i].FromUserId == userId then
+			table.remove(Store.TradeRequests, i)
+		end
+	end
+	if not silent then
+		changed:Fire("TradeRequests")
+	end
+end
+
 -- Optimistically change the selected seed before the server confirms.
 function Store.SelectSeed(seedId)
 	if Store.Data then
@@ -2264,7 +3542,596 @@ return Store
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="40">
+        <Item class="ModuleScript" referent="44">
+          <Properties>
+            <string name="Name">TradeWindow</string>
+            <string name="Source"><![CDATA[-- Trading birds and coins with other players.
+-- Lobby: send requests to players in the server and answer requests.
+-- Trade: build your offer, see theirs, both press Ready, and after a short
+-- countdown the server swaps everything.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Birds = require(Shared.Birds)
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+local Pets = require(Shared.Pets)
+local Rarities = require(Shared.Rarities)
+local Util = require(Shared.Util)
+local Notifications = require(script.Parent.Notifications)
+local Store = require(script.Parent.Store)
+local UI = require(script.Parent.UI)
+
+local TradeWindow = {}
+
+local localPlayer = Players.LocalPlayer
+
+local window, lobby, headerInfo
+local tradeFrame, myCoinsBox, myCoinsHint, myOfferList, addList, theirTitle, theirCoins, theirList, theirReady
+local statusLabel, readyButton
+local popup, popupLabel
+local wasActive = false
+
+local function petLine(name, species, stars, shiny, baby, value)
+	local def = Birds.Get(species)
+	return (shiny and "✨" or "")
+		.. (baby and "👶" or "")
+		.. name
+		.. " "
+		.. Pets.StarText(stars)
+		.. "  "
+		.. (def and def.Name or species)
+		.. (value and ("  •  🪙 " .. Util.FormatNumber(value)) or "")
+end
+
+local function clearRows(list)
+	for _, child in ipairs(list:GetChildren()) do
+		if child:IsA("Frame") or child:IsA("TextLabel") then
+			child:Destroy()
+		end
+	end
+end
+
+local function row(list, order, text, color, buttonText, buttonColor, onClick)
+	local frame = UI.new("Frame", {
+		LayoutOrder = order,
+		Size = UDim2.new(1, -6, 0, 32),
+		BackgroundColor3 = UI.Colors.PanelDark,
+		Parent = list,
+	}, { UI.corner(8) })
+	UI.label({
+		Text = text,
+		TextColor3 = color or UI.Colors.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Position = UDim2.fromOffset(8, 4),
+		Size = UDim2.new(1, buttonText and -86 or -16, 1, -8),
+		Parent = frame,
+	})
+	if buttonText then
+		UI.button({
+			Text = buttonText,
+			BackgroundColor3 = buttonColor or UI.Colors.Green,
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -4, 0.5, 0),
+			Size = UDim2.fromOffset(74, 26),
+			Parent = frame,
+		}, onClick)
+	end
+	return frame
+end
+
+local function emptyRow(list, text)
+	UI.label({
+		LayoutOrder = 0,
+		Text = text,
+		TextColor3 = UI.Colors.SubText,
+		TextWrapped = true,
+		Size = UDim2.new(1, -6, 0, 30),
+		Parent = list,
+	})
+end
+
+local function scrollList(parent, position, size)
+	return UI.new("ScrollingFrame", {
+		Position = position,
+		Size = size,
+		BackgroundColor3 = UI.Colors.Panel,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 6,
+		ScrollBarImageColor3 = UI.Colors.Wood,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Parent = parent,
+	}, {
+		UI.corner(8),
+		UI.new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }),
+		UI.new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4) }),
+	})
+end
+
+------------------------------------------------------------------------------
+-- Lobby
+
+local function refreshLobby()
+	clearRows(lobby)
+	local order = 0
+	local now = Store.Now()
+
+	UI.label({
+		LayoutOrder = order,
+		Text = "Trade requests",
+		Font = UI.TitleFont,
+		TextColor3 = UI.Colors.Wood,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.new(1, -6, 0, 24),
+		Parent = lobby,
+	})
+	local anyRequest = false
+	for _, request in ipairs(Store.TradeRequests) do
+		if request.ExpiresAt > now then
+			anyRequest = true
+			order += 1
+			local frame = row(
+				lobby,
+				order,
+				"🤝 " .. request.FromName .. " wants to trade!",
+				nil,
+				"Accept",
+				UI.Colors.Green,
+				function()
+					Net.TradeRespond:FireServer(request.FromUserId, true)
+					Store.RemoveTradeRequest(request.FromUserId)
+				end
+			)
+			UI.button({
+				Text = "No",
+				BackgroundColor3 = UI.Colors.Red,
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -82, 0.5, 0),
+				Size = UDim2.fromOffset(50, 26),
+				Parent = frame,
+			}, function()
+				Net.TradeRespond:FireServer(request.FromUserId, false)
+				Store.RemoveTradeRequest(request.FromUserId)
+			end)
+		end
+	end
+	if not anyRequest then
+		order += 1
+		local label = UI.label({
+			LayoutOrder = order,
+			Text = "No requests right now.",
+			TextColor3 = UI.Colors.SubText,
+			Size = UDim2.new(1, -6, 0, 22),
+			Parent = lobby,
+		})
+		label.Name = "NoRequests"
+	end
+
+	order += 1
+	UI.label({
+		LayoutOrder = order,
+		Text = "Players in this server",
+		Font = UI.TitleFont,
+		TextColor3 = UI.Colors.Wood,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.new(1, -6, 0, 24),
+		Parent = lobby,
+	})
+	local anyPlayer = false
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= localPlayer then
+			anyPlayer = true
+			order += 1
+			row(lobby, order, player.DisplayName, nil, "Request", Color3.fromRGB(90, 140, 220), function()
+				Net.TradeRequest:FireServer(player.UserId)
+			end)
+		end
+	end
+	if not anyPlayer then
+		order += 1
+		UI.label({
+			LayoutOrder = order,
+			Text = "Nobody else is here yet. Invite a friend to trade birds!",
+			TextColor3 = UI.Colors.SubText,
+			TextWrapped = true,
+			Size = UDim2.new(1, -6, 0, 40),
+			Parent = lobby,
+		})
+	end
+end
+
+------------------------------------------------------------------------------
+-- Active trade
+
+local function refreshTrade(trade)
+	local data = Store.Data
+	local now = Store.Now()
+	local myPets = data and data.Pets or {}
+
+	headerInfo.Text = "with " .. trade.PartnerName
+	theirTitle.Text = trade.PartnerName .. " gives"
+	if not myCoinsBox:IsFocused() then
+		myCoinsBox.Text = tostring(trade.MyCoins)
+	end
+	myCoinsHint.Text = "You have 🪙 " .. Util.FormatNumber(data and data.Coins or 0)
+	theirCoins.Text = "🪙 " .. Util.FormatNumber(trade.TheirCoins) .. " coins"
+
+	clearRows(myOfferList)
+	if #trade.MyPets == 0 then
+		emptyRow(myOfferList, "Add birds from the list below.")
+	end
+	for order, petId in ipairs(trade.MyPets) do
+		local pet = myPets[petId]
+		if pet then
+			local def = Pets.Def(pet)
+			row(
+				myOfferList,
+				order,
+				petLine(pet.Name, pet.Species, pet.Stars, pet.Shiny, Pets.IsBaby(pet, now)),
+				Rarities.Color(def.Rarity),
+				"Remove",
+				UI.Colors.Red,
+				function()
+					Net.TradeUpdate:FireServer("RemovePet", petId)
+				end
+			)
+		end
+	end
+
+	clearRows(addList)
+	local order = 0
+	for _, petId in ipairs(Pets.SortKeys(myPets)) do
+		local pet = myPets[petId]
+		if not table.find(trade.MyPets, petId) and not pet.Favorite and not pet.Nest then
+			order += 1
+			row(
+				addList,
+				order,
+				petLine(pet.Name, pet.Species, pet.Stars, pet.Shiny, Pets.IsBaby(pet, now)),
+				Rarities.Color(Pets.Def(pet).Rarity),
+				"Add",
+				UI.Colors.Green,
+				function()
+					Net.TradeUpdate:FireServer("AddPet", petId)
+				end
+			)
+		end
+	end
+	if order == 0 then
+		emptyRow(addList, "No birds to add. Favorites (❤) and nesting birds can't be traded.")
+	end
+
+	clearRows(theirList)
+	if #trade.TheirPets == 0 then
+		emptyRow(theirList, "No birds offered yet.")
+	end
+	for index, summary in ipairs(trade.TheirPets) do
+		local def = Birds.Get(summary.Species)
+		row(
+			theirList,
+			index,
+			petLine(summary.Name, summary.Species, summary.Stars, summary.Shiny, summary.Baby, summary.Value),
+			def and Rarities.Color(def.Rarity)
+		)
+	end
+	theirReady.Text = trade.TheirReady and ("✅ " .. trade.PartnerName .. " is ready") or "⏳ Not ready yet"
+	theirReady.TextColor3 = trade.TheirReady and UI.Colors.Green or UI.Colors.SubText
+
+	readyButton.Text = trade.MyReady and "Not ready" or "✅ Ready"
+	readyButton.BackgroundColor3 = trade.MyReady and UI.Colors.Wood or UI.Colors.Green
+end
+
+local function updateStatus()
+	local trade = Store.Trade
+	if not trade or not trade.Active then
+		return
+	end
+	if trade.ExecuteAt then
+		local remaining = math.max(0, math.ceil(trade.ExecuteAt - Store.Now()))
+		statusLabel.Text = "🤝 Both ready! Trading in " .. remaining .. "..."
+		statusLabel.TextColor3 = UI.Colors.Green
+	elseif trade.MyReady then
+		statusLabel.Text = "Waiting for " .. trade.PartnerName .. " to be ready..."
+		statusLabel.TextColor3 = UI.Colors.SubText
+	else
+		statusLabel.Text = "Check both sides, then press Ready. Any change un-readies you both."
+		statusLabel.TextColor3 = UI.Colors.SubText
+	end
+end
+
+local function refresh()
+	local trade = Store.Trade
+	local active = trade ~= nil and trade.Active
+	if active and not wasActive then
+		-- a trade just started: show it
+		window.Visible = true
+	end
+	wasActive = active
+	lobby.Visible = not active
+	tradeFrame.Visible = active
+	if not window.Visible then
+		return
+	end
+	if active then
+		refreshTrade(trade)
+		updateStatus()
+	else
+		headerInfo.Text = ""
+		refreshLobby()
+	end
+end
+
+------------------------------------------------------------------------------
+-- Request popup
+
+local function refreshPopup()
+	local now = Store.Now()
+	local latest
+	for _, request in ipairs(Store.TradeRequests) do
+		if request.ExpiresAt > now then
+			latest = request
+		end
+	end
+	local trading = Store.Trade and Store.Trade.Active
+	popup.Visible = latest ~= nil and not trading
+	if latest then
+		popupLabel.Text = "🤝 "
+			.. latest.FromName
+			.. " wants to trade! ("
+			.. math.ceil(latest.ExpiresAt - now)
+			.. "s)"
+		popup:SetAttribute("FromUserId", latest.FromUserId)
+	end
+end
+
+local function buildPopup(screenGui)
+	popup = UI.new("Frame", {
+		Name = "TradeRequestPopup",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0.3, 0),
+		Size = UDim2.fromOffset(340, 96),
+		BackgroundColor3 = UI.Colors.Panel,
+		Visible = false,
+		Parent = screenGui,
+	}, { UI.corner(14), UI.stroke(UI.Colors.Wood, 3) })
+	popupLabel = UI.label({
+		Font = UI.TitleFont,
+		Position = UDim2.fromOffset(10, 8),
+		Size = UDim2.new(1, -20, 0, 30),
+		Parent = popup,
+	})
+	local function answer(accept)
+		local fromUserId = popup:GetAttribute("FromUserId")
+		if fromUserId then
+			Net.TradeRespond:FireServer(fromUserId, accept)
+			Store.RemoveTradeRequest(fromUserId)
+		end
+	end
+	UI.button({
+		Name = "Accept",
+		Text = "Accept",
+		Position = UDim2.new(0, 10, 1, -48),
+		Size = UDim2.new(0.5, -15, 0, 38),
+		Parent = popup,
+	}, function()
+		answer(true)
+	end)
+	UI.button({
+		Name = "Decline",
+		Text = "Decline",
+		BackgroundColor3 = UI.Colors.Red,
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -10, 1, -48),
+		Size = UDim2.new(0.5, -15, 0, 38),
+		Parent = popup,
+	}, function()
+		answer(false)
+	end)
+end
+
+------------------------------------------------------------------------------
+
+function TradeWindow.Init(screenGui)
+	local body
+	window, body, headerInfo = UI.window(screenGui, "🤝 Trade", function()
+		if Store.Trade and Store.Trade.Active then
+			-- closing with the X during a trade cancels it, so nobody gets stuck
+			Net.TradeUpdate:FireServer("Cancel")
+		end
+		TradeWindow.Close()
+	end)
+	lobby = body
+	UI.new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = lobby })
+
+	tradeFrame = UI.new("Frame", {
+		Name = "Trade",
+		Position = UDim2.new(0, 10, 0, 58),
+		Size = UDim2.new(1, -20, 1, -66),
+		BackgroundTransparency = 1,
+		Visible = false,
+		Parent = window,
+	})
+
+	-- left: your side
+	local left = UI.new("Frame", { Size = UDim2.new(0.5, -5, 1, -54), BackgroundTransparency = 1, Parent = tradeFrame })
+	UI.label({
+		Text = "You give",
+		Font = UI.TitleFont,
+		TextColor3 = UI.Colors.Wood,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.new(1, 0, 0, 22),
+		Parent = left,
+	})
+	UI.label({ Text = "🪙", Position = UDim2.fromOffset(0, 26), Size = UDim2.fromOffset(24, 26), Parent = left })
+	myCoinsBox = UI.new("TextBox", {
+		Name = "Coins",
+		Position = UDim2.fromOffset(26, 26),
+		Size = UDim2.new(0.45, -26, 0, 26),
+		BackgroundColor3 = UI.Colors.White,
+		Font = UI.BodyFont,
+		Text = "0",
+		PlaceholderText = "coins",
+		TextColor3 = UI.Colors.Text,
+		TextScaled = true,
+		ClearTextOnFocus = false,
+		Parent = left,
+	}, { UI.corner(6) })
+	myCoinsBox.FocusLost:Connect(function()
+		local amount = tonumber(myCoinsBox.Text)
+		if amount then
+			Net.TradeUpdate:FireServer("SetCoins", math.max(0, math.floor(amount)))
+		else
+			myCoinsBox.Text = tostring(Store.Trade and Store.Trade.MyCoins or 0)
+		end
+	end)
+	myCoinsHint = UI.label({
+		TextColor3 = UI.Colors.SubText,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Position = UDim2.new(0.45, 6, 0, 30),
+		Size = UDim2.new(0.55, -6, 0, 18),
+		Parent = left,
+	})
+	myOfferList = scrollList(left, UDim2.fromOffset(0, 56), UDim2.new(1, 0, 0.42, -56))
+	UI.label({
+		Text = "Add a bird (up to " .. Config.TradeMaxPets .. ")",
+		Font = UI.TitleFont,
+		TextColor3 = UI.Colors.Wood,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Position = UDim2.new(0, 0, 0.42, 4),
+		Size = UDim2.new(1, 0, 0, 20),
+		Parent = left,
+	})
+	addList = scrollList(left, UDim2.new(0, 0, 0.42, 26), UDim2.new(1, 0, 0.58, -26))
+
+	-- right: their side
+	local right = UI.new("Frame", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.new(0.5, -5, 1, -54),
+		BackgroundTransparency = 1,
+		Parent = tradeFrame,
+	})
+	theirTitle = UI.label({
+		Font = UI.TitleFont,
+		TextColor3 = UI.Colors.Wood,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.new(1, 0, 0, 22),
+		Parent = right,
+	})
+	theirCoins = UI.label({
+		Font = UI.TitleFont,
+		TextColor3 = UI.Colors.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Position = UDim2.fromOffset(0, 26),
+		Size = UDim2.new(1, 0, 0, 24),
+		Parent = right,
+	})
+	theirList = scrollList(right, UDim2.fromOffset(0, 56), UDim2.new(1, 0, 1, -84))
+	theirReady = UI.label({
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 0, 1, 0),
+		Size = UDim2.new(1, 0, 0, 22),
+		Parent = right,
+	})
+
+	-- bottom bar
+	local bottom = UI.new("Frame", {
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 0, 1, 0),
+		Size = UDim2.new(1, 0, 0, 46),
+		BackgroundTransparency = 1,
+		Parent = tradeFrame,
+	})
+	statusLabel = UI.label({
+		TextWrapped = true,
+		Size = UDim2.new(0.5, -6, 1, 0),
+		Parent = bottom,
+	})
+	readyButton = UI.button({
+		Name = "Ready",
+		Position = UDim2.new(0.5, 0, 0, 2),
+		Size = UDim2.new(0.25, -4, 1, -4),
+		Parent = bottom,
+	}, function()
+		local trade = Store.Trade
+		if trade and trade.Active then
+			Net.TradeUpdate:FireServer(trade.MyReady and "Unready" or "Ready")
+		end
+	end)
+	UI.button({
+		Name = "Cancel",
+		Text = "Cancel",
+		BackgroundColor3 = UI.Colors.Red,
+		Position = UDim2.new(0.75, 4, 0, 2),
+		Size = UDim2.new(0.25, -4, 1, -4),
+		Parent = bottom,
+	}, function()
+		Net.TradeUpdate:FireServer("Cancel")
+	end)
+
+	buildPopup(screenGui)
+
+	Store.Changed:Connect(function(what)
+		if what == "Trade" then
+			local trade = Store.Trade
+			if trade and not trade.Active and trade.Reason and wasActive then
+				Notifications.Show(trade.Reason, trade.Completed and "Success" or "Info")
+			end
+			refresh()
+			refreshPopup()
+		elseif what == "TradeRequests" then
+			refreshPopup()
+			if window.Visible and not (Store.Trade and Store.Trade.Active) then
+				refreshLobby()
+			end
+		elseif what == "Data" and Store.Trade and Store.Trade.Active and window.Visible then
+			refreshTrade(Store.Trade)
+		end
+	end)
+	task.spawn(function()
+		while true do
+			task.wait(0.25)
+			updateStatus()
+			refreshPopup()
+		end
+	end)
+	Players.PlayerAdded:Connect(function()
+		if window.Visible and not (Store.Trade and Store.Trade.Active) then
+			refreshLobby()
+		end
+	end)
+	Players.PlayerRemoving:Connect(function()
+		task.defer(function()
+			if window.Visible and not (Store.Trade and Store.Trade.Active) then
+				refreshLobby()
+			end
+		end)
+	end)
+end
+
+function TradeWindow.Open()
+	window.Visible = true
+	UI.pop(window)
+	refresh()
+end
+
+-- Just hides the window (the trade carries on; the Trade button brings it back).
+function TradeWindow.Close()
+	window.Visible = false
+end
+
+function TradeWindow.IsOpen()
+	return window.Visible
+end
+
+return TradeWindow
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="45">
           <Properties>
             <string name="Name">UI</string>
             <string name="Source"><![CDATA[-- Tiny helpers for building the interface in code.
@@ -2461,7 +4328,7 @@ return UI
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="41">
+        <Item class="ModuleScript" referent="46">
           <Properties>
             <string name="Name">Viewport</string>
             <string name="Source"><![CDATA[-- Shows a 3D model inside a ViewportFrame (used for shop and journal pictures).
@@ -2497,7 +4364,7 @@ return Viewport
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="42">
+        <Item class="ModuleScript" referent="47">
           <Properties>
             <string name="Name">WorldFx</string>
             <string name="Source"><![CDATA[-- Client-side world polish: hides other players' prompts, highlights the soil
@@ -2689,11 +4556,14 @@ local function updatePlantLabels(now)
 				status.Text = model:GetAttribute("HasBird") and "🐦 A bird is visiting!" or "🌸 Attracting birds"
 				bar.Visible = false
 			else
-				local plantedAt = model:GetAttribute("PlantedAt") or now
+				-- the server sends how grown it was at a moment and how fast it grows
 				local growTime = model:GetAttribute("GrowTime") or 1
-				local remaining = plantedAt + growTime - now
+				local speed = model:GetAttribute("Speed") or 1
+				local grown = (model:GetAttribute("Grown") or 0)
+					+ (now - (model:GetAttribute("GrownAt") or now)) * speed
+				local remaining = (growTime - grown) / speed
 				status.Text = remaining > 0 and ("⏳ " .. Util.FormatTime(remaining)) or "Almost ready..."
-				fill.Size = UDim2.fromScale(math.clamp(1 - remaining / growTime, 0, 1), 1)
+				fill.Size = UDim2.fromScale(math.clamp(grown / growTime, 0, 1), 1)
 				bar.Visible = true
 			end
 		end
@@ -2717,12 +4587,42 @@ local function updateBirdLabels(now)
 	end
 end
 
+local function updateNestLabels(now)
+	local root = workspace:FindFirstChild("BirdGarden")
+	local plots = root and root:FindFirstChild("Plots")
+	if not plots then
+		return
+	end
+	for _, plot in ipairs(plots:GetChildren()) do
+		for _, nest in ipairs(plot:GetChildren()) do
+			local base = nest:IsA("Model") and nest:FindFirstChild("NestBase")
+			local gui = base and base:FindFirstChild("NestStatus")
+			local label = gui and gui:FindFirstChild("Status")
+			if label then
+				local def = Birds.Get(base:GetAttribute("Species") or "")
+				if not def then
+					label.Text = "🪺 Empty nest"
+				elseif base:GetAttribute("Waiting") then
+					label.Text = "🥚 Ready! Make room in your aviary"
+				else
+					local remaining = (base:GetAttribute("HatchAt") or now) - now
+					label.Text = "🥚 "
+						.. def.Name
+						.. " egg  •  "
+						.. (remaining > 0 and Util.FormatTime(remaining) or "hatching!")
+				end
+			end
+		end
+	end
+end
+
 local function setupLabels()
 	task.spawn(function()
 		while true do
 			local now = Store.Now()
 			updatePlantLabels(now)
 			updateBirdLabels(now)
+			updateNestLabels(now)
 			task.wait(0.25)
 		end
 	end)
@@ -2731,7 +4631,7 @@ end
 ------------------------------------------------------------------------------
 -- Floating text
 
-local function showFloatingText(position, text, color)
+function WorldFx.ShowFloatingText(position, text, color)
 	if typeof(position) ~= "Vector3" or type(text) ~= "string" then
 		return
 	end
@@ -2775,7 +4675,7 @@ function WorldFx.Init()
 	setupTileHighlight()
 	setupBirdAnimation()
 	setupLabels()
-	Net.Effect.OnClientEvent:Connect(showFloatingText)
+	Net.Effect.OnClientEvent:Connect(WorldFx.ShowFloatingText)
 end
 
 return WorldFx
@@ -2784,7 +4684,7 @@ return WorldFx
         </Item>
       </Item>
     </Item>
-    <Item class="StarterCharacterScripts" referent="43">
+    <Item class="StarterCharacterScripts" referent="48">
       <Properties>
         <string name="Name">StarterCharacterScripts</string>
         <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2797,7 +4697,7 @@ return WorldFx
       </Properties>
     </Item>
   </Item>
-  <Item class="StarterPack" referent="44">
+  <Item class="StarterPack" referent="49">
     <Properties>
       <string name="Name">StarterPack</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2809,7 +4709,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f370000038c</UniqueId>
     </Properties>
   </Item>
-  <Item class="StarterGui" referent="45">
+  <Item class="StarterGui" referent="50">
     <Properties>
       <string name="Name">StarterGui</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2829,7 +4729,7 @@ return WorldFx
       <token name="VirtualCursorMode">0</token>
     </Properties>
   </Item>
-  <Item class="LocalizationService" referent="46">
+  <Item class="LocalizationService" referent="51">
     <Properties>
       <string name="Name">LocalizationService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2841,7 +4741,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f370000038f</UniqueId>
     </Properties>
   </Item>
-  <Item class="TeleportService" referent="47">
+  <Item class="TeleportService" referent="52">
     <Properties>
       <string name="Name">Teleport Service</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2853,7 +4753,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f3700000393</UniqueId>
     </Properties>
   </Item>
-  <Item class="PhysicsService" referent="48">
+  <Item class="PhysicsService" referent="53">
     <Properties>
       <string name="Name">PhysicsService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2865,7 +4765,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f3700000395</UniqueId>
     </Properties>
   </Item>
-  <Item class="InsertService" referent="49">
+  <Item class="InsertService" referent="54">
     <Properties>
       <string name="Name">InsertService</string>
       <bool name="AllowInsertFreeModels">false</bool>
@@ -2877,7 +4777,7 @@ return WorldFx
       <BinaryString name="Tags"></BinaryString>
       <UniqueId name="UniqueId">184acf13447c97560ad43f3700000398</UniqueId>
     </Properties>
-    <Item class="StringValue" referent="50">
+    <Item class="StringValue" referent="55">
       <Properties>
         <string name="Name">InsertionHash</string>
         <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2891,7 +4791,7 @@ return WorldFx
       </Properties>
     </Item>
   </Item>
-  <Item class="GamePassService" referent="51">
+  <Item class="GamePassService" referent="56">
     <Properties>
       <string name="Name">GamePassService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2903,7 +4803,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f3700000399</UniqueId>
     </Properties>
   </Item>
-  <Item class="Debris" referent="52">
+  <Item class="Debris" referent="57">
     <Properties>
       <string name="Name">Debris</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2916,7 +4816,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f370000039a</UniqueId>
     </Properties>
   </Item>
-  <Item class="CookiesService" referent="53">
+  <Item class="CookiesService" referent="58">
     <Properties>
       <string name="Name">CookiesService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2928,7 +4828,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f370000039b</UniqueId>
     </Properties>
   </Item>
-  <Item class="Selection" referent="54">
+  <Item class="Selection" referent="59">
     <Properties>
       <string name="Name">Selection</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2940,7 +4840,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f370000039c</UniqueId>
     </Properties>
   </Item>
-  <Item class="VRService" referent="55">
+  <Item class="VRService" referent="60">
     <Properties>
       <string name="Name">VRService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2957,7 +4857,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003a0</UniqueId>
     </Properties>
   </Item>
-  <Item class="ContextActionService" referent="56">
+  <Item class="ContextActionService" referent="61">
     <Properties>
       <string name="Name">ContextActionService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2969,7 +4869,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003a1</UniqueId>
     </Properties>
   </Item>
-  <Item class="ScriptService" referent="57">
+  <Item class="ScriptService" referent="62">
     <Properties>
       <string name="Name">Instance</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -2981,7 +4881,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003a2</UniqueId>
     </Properties>
   </Item>
-  <Item class="AssetService" referent="58">
+  <Item class="AssetService" referent="63">
     <Properties>
       <string name="Name">AssetService</string>
       <bool name="AllowInsertFreeAssets">false</bool>
@@ -2994,7 +4894,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003a3</UniqueId>
     </Properties>
   </Item>
-  <Item class="TouchInputService" referent="59">
+  <Item class="TouchInputService" referent="64">
     <Properties>
       <string name="Name">TouchInputService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -3006,7 +4906,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003a5</UniqueId>
     </Properties>
   </Item>
-  <Item class="AvatarSettings" referent="60">
+  <Item class="AvatarSettings" referent="65">
     <Properties>
       <string name="Name">AvatarSettings</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -3018,7 +4918,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003ab</UniqueId>
     </Properties>
   </Item>
-  <Item class="Packages" referent="61">
+  <Item class="Packages" referent="66">
     <Properties>
       <string name="Name">Packages</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -3033,7 +4933,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003af</UniqueId>
     </Properties>
   </Item>
-  <Item class="GuidRegistryService" referent="62">
+  <Item class="GuidRegistryService" referent="67">
     <Properties>
       <string name="Name">GuidRegistryService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -3045,7 +4945,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003b0</UniqueId>
     </Properties>
   </Item>
-  <Item class="ServiceVisibilityService" referent="63">
+  <Item class="ServiceVisibilityService" referent="68">
     <Properties>
       <string name="Name">ServiceVisibilityService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -3059,7 +4959,7 @@ return WorldFx
       <BinaryString name="VisibleServices"><![CDATA[AAAAAA==]]></BinaryString>
     </Properties>
   </Item>
-  <Item class="LuaWebService" referent="64">
+  <Item class="LuaWebService" referent="69">
     <Properties>
       <string name="Name">LuaWebService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -3071,7 +4971,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003cb</UniqueId>
     </Properties>
   </Item>
-  <Item class="ProcessInstancePhysicsService" referent="65">
+  <Item class="ProcessInstancePhysicsService" referent="70">
     <Properties>
       <string name="Name">ProcessInstancePhysicsService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -3083,7 +4983,7 @@ return WorldFx
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003cc</UniqueId>
     </Properties>
   </Item>
-  <Item class="ReplicatedStorage" referent="66">
+  <Item class="ReplicatedStorage" referent="71">
     <Properties>
       <string name="Name">ReplicatedStorage</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -3094,11 +4994,11 @@ return WorldFx
       <BinaryString name="Tags"></BinaryString>
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003cd</UniqueId>
     </Properties>
-    <Item class="Folder" referent="67">
+    <Item class="Folder" referent="72">
       <Properties>
         <string name="Name">Shared</string>
       </Properties>
-      <Item class="ModuleScript" referent="68">
+      <Item class="ModuleScript" referent="73">
         <Properties>
           <string name="Name">BirdBuilder</string>
           <string name="Source"><![CDATA[-- Builds bird models out of simple parts from a bird definition (see Birds.lua).
@@ -3345,11 +5245,13 @@ return BirdBuilder
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="69">
+      <Item class="ModuleScript" referent="74">
         <Properties>
           <string name="Name">Birds</string>
-          <string name="Source"><![CDATA[-- Every bird that can visit a garden. Reward is the number of coins you get
--- for befriending one. The Look table is used by BirdBuilder to make the model.
+          <string name="Source"><![CDATA[-- Every bird that can visit a garden. Reward is what one is worth in coins
+-- (its sell price before stars and shiny bonuses). Perk is what it does for
+-- your garden when it roams there (see Pets.lua). The Look table is used by
+-- BirdBuilder to make the model.
 
 local function rgb(r, g, b)
 	return Color3.fromRGB(r, g, b)
@@ -3363,6 +5265,7 @@ Birds.List = {
 		Name = "Sparrow",
 		Rarity = "Common",
 		Reward = 4,
+		Perk = "SeedFinder",
 		Description = "A chirpy little visitor that loves seeds.",
 		Look = {
 			Size = 0.85,
@@ -3380,6 +5283,7 @@ Birds.List = {
 		Name = "Pigeon",
 		Rarity = "Common",
 		Reward = 5,
+		Perk = "Attraction",
 		Description = "Bobs its head everywhere it goes.",
 		Look = {
 			Size = 1,
@@ -3396,6 +5300,7 @@ Birds.List = {
 		Name = "Robin",
 		Rarity = "Common",
 		Reward = 7,
+		Perk = "SeedFinder",
 		Description = "Its bright orange chest says spring is here.",
 		Look = {
 			Size = 0.9,
@@ -3412,6 +5317,7 @@ Birds.List = {
 		Name = "Goldfinch",
 		Rarity = "Uncommon",
 		Reward = 12,
+		Perk = "Coins",
 		Description = "A flash of sunshine with tiny black wings.",
 		Look = {
 			Size = 0.8,
@@ -3428,6 +5334,7 @@ Birds.List = {
 		Name = "Blue Jay",
 		Rarity = "Uncommon",
 		Reward = 16,
+		Perk = "SeedFinder",
 		Description = "Loud, clever and very blue.",
 		Look = {
 			Size = 1,
@@ -3446,6 +5353,7 @@ Birds.List = {
 		Name = "Cardinal",
 		Rarity = "Uncommon",
 		Reward = 22,
+		Perk = "Luck",
 		Description = "A bright red songbird with a pointy crest.",
 		Look = {
 			Size = 0.95,
@@ -3464,6 +5372,7 @@ Birds.List = {
 		Name = "Hummingbird",
 		Rarity = "Rare",
 		Reward = 45,
+		Perk = "Growth",
 		Description = "So fast its wings are just a blur. It never sits still!",
 		Look = {
 			Size = 0.65,
@@ -3484,6 +5393,7 @@ Birds.List = {
 		Name = "Scarlet Macaw",
 		Rarity = "Rare",
 		Reward = 70,
+		Perk = "Coins",
 		Description = "A chatty parrot in red, blue and gold.",
 		Look = {
 			Size = 1.15,
@@ -3506,6 +5416,7 @@ Birds.List = {
 		Name = "Toucan",
 		Rarity = "Epic",
 		Reward = 150,
+		Perk = "SeedFinder",
 		Description = "Famous for its giant rainbow-orange beak.",
 		Look = {
 			Size = 1.1,
@@ -3526,6 +5437,7 @@ Birds.List = {
 		Name = "Flamingo",
 		Rarity = "Epic",
 		Reward = 200,
+		Perk = "Growth",
 		Description = "Stands on its long legs and looks fabulous.",
 		Look = {
 			Size = 1.1,
@@ -3546,6 +5458,7 @@ Birds.List = {
 		Name = "Peacock",
 		Rarity = "Legendary",
 		Reward = 550,
+		Perk = "Attraction",
 		Description = "Shows off a dazzling fan of eye-spotted feathers.",
 		Look = {
 			Size = 1.3,
@@ -3567,6 +5480,7 @@ Birds.List = {
 		Name = "Snowy Owl",
 		Rarity = "Legendary",
 		Reward = 700,
+		Perk = "Luck",
 		Description = "Silent, wise and soft as fresh snow.",
 		Look = {
 			Size = 1.25,
@@ -3592,6 +5506,7 @@ Birds.List = {
 		Name = "Phoenix",
 		Rarity = "Mythic",
 		Reward = 2500,
+		Perk = "Growth",
 		Description = "A legendary bird of fire, reborn from its own ashes.",
 		Look = {
 			Size = 1.4,
@@ -3625,7 +5540,7 @@ return Birds
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="70">
+      <Item class="ModuleScript" referent="75">
         <Properties>
           <string name="Name">Config</string>
           <string name="Source"><![CDATA[-- Global tuning values for Grow a Bird Garden.
@@ -3636,8 +5551,9 @@ local Config = {
 	StartingCoins = 20,
 	StartingSeeds = { Sunflower = 3 },
 
-	-- Growth speed multiplier. 1 = normal. Set to something like 20 while
-	-- testing in Studio so plants bloom in seconds instead of minutes.
+	-- Speed multiplier for all the waiting: plants growing, eggs hatching and
+	-- babies growing up. 1 = normal. Set to something like 20 while testing in
+	-- Studio so things happen in seconds instead of minutes.
 	GrowthSpeed = 1,
 
 	-- Growth stages are reached at these fractions of the total grow time.
@@ -3651,8 +5567,25 @@ local Config = {
 	BirdStayTime = 45, -- seconds a perched bird waits before flying off
 	BirdFlightSpeed = 28, -- studs per second
 	ShinyChance = 0.02, -- chance a visiting bird is a sparkly shiny
-	ShinyMultiplier = 5, -- coin multiplier for befriending a shiny bird
-	DiscoveryBonusMultiplier = 3, -- first time you befriend a species you get this many times the reward
+	ShinyMultiplier = 5, -- shiny birds are worth this many times more
+	DiscoveryBonusMultiplier = 3, -- first time you befriend a species you get its value times this in coins
+
+	-- Pets (befriended birds)
+	MaxPets = 60, -- how many birds fit in your aviary
+	MaxEquippedPets = 6, -- how many can roam your garden (and give perks) at once
+	WildStarWeights = { 50, 35, 15 }, -- chance of a wild bird having 1, 2 or 3 stars
+	SeedFinderInterval = 60, -- seconds between seed finder rolls
+
+	-- Breeding
+	NestCount = 2,
+	BredStarUpChance = 0.35, -- chance a baby gets one more star than its parents
+	BredShinyChance = { 0.02, 0.15, 0.5 }, -- with 0, 1 or 2 shiny parents
+
+	-- Trading
+	TradeMaxPets = 8, -- pets each side can offer
+	TradeCountdown = 3, -- seconds after both players are ready
+	TradeRequestTimeout = 30,
+	TradeRequestCooldown = 5,
 
 	-- Saving
 	DataStoreName = "BirdGarden_v1",
@@ -3670,7 +5603,7 @@ return Config
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="71">
+      <Item class="ModuleScript" referent="76">
         <Properties>
           <string name="Name">Net</string>
           <string name="Source"><![CDATA[-- Creates (on the server) or finds (on the client) every remote the game uses.
@@ -3690,11 +5623,19 @@ local DEFINITIONS = {
 		"OpenShop", -- server -> client: open the shop window
 		"SelectSeed", -- client -> server: choose which seed to plant
 		"Teleport", -- client -> server: "Garden" or "Shop"
+		"PetEvent", -- server -> client: something happened to a pet (floating text over it)
+		"OpenNest", -- server -> client: open the nest window
+		"TradeRequest", -- client -> server: ask another player to trade
+		"TradeRespond", -- client -> server: accept or decline a trade request
+		"TradeUpdate", -- client -> server: change your offer, ready up or cancel
+		"TradeIncoming", -- server -> client: someone wants to trade with you
+		"TradeState", -- server -> client: the current trade
 	},
 	RemoteFunction = {
 		"GetState", -- client -> server: initial state snapshot
 		"GetShop", -- client -> server: initial shop snapshot
 		"BuySeed", -- client -> server: buy one seed, returns ok, message
+		"PetAction", -- client -> server: equip, sell, breed... returns ok, message
 	},
 }
 
@@ -3731,7 +5672,289 @@ return Net
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="72">
+      <Item class="ModuleScript" referent="77">
+        <Properties>
+          <string name="Name">Pets</string>
+          <string name="Source"><![CDATA[-- Rules for pet birds, shared by the server (authority) and the client (UI).
+--
+-- A pet is a plain table saved in the player's data:
+--   Species     bird id from Birds.lua
+--   Name        first name, e.g. "Pip"
+--   Family      family surname once it has bred or was born into a family
+--   Stars       1-5, how talented it is (better perks, worth more)
+--   Shiny       sparkly variant
+--   Generation  0 for wild birds, parents' generation + 1 for babies
+--   Parents     "Pip & Kiwi" for babies
+--   GrowsUpAt   unix time a baby becomes an adult (nil for adults)
+--   Equipped    roaming your garden and giving its perk
+--   Favorite    protected from selling and trading
+--   Nest        nest number while it is sitting on an egg
+
+local Birds = require(script.Parent.Birds)
+local Config = require(script.Parent.Config)
+local Rarities = require(script.Parent.Rarities)
+
+local Pets = {}
+
+-- Each bird species gives one of these perks while it roams your garden.
+-- Bonus = PerPoint * pet points, up to Max.
+Pets.Perks = {
+	Growth = {
+		Icon = "🌱",
+		Name = "Green Thumb",
+		Description = "plants grow faster",
+		PerPoint = 0.03,
+		Max = 1.5,
+	},
+	Attraction = {
+		Icon = "🐦",
+		Name = "Social",
+		Description = "birds visit more often",
+		PerPoint = 0.03,
+		Max = 1,
+	},
+	Luck = {
+		Icon = "🍀",
+		Name = "Lucky",
+		Description = "rarer and shinier visitors",
+		PerPoint = 0.03,
+		Max = 1.5,
+	},
+	Coins = {
+		Icon = "🪙",
+		Name = "Haggler",
+		Description = "birds sell for more",
+		PerPoint = 0.04,
+		Max = 2,
+	},
+	SeedFinder = {
+		Icon = "🎒",
+		Name = "Seed Finder",
+		Description = "chance each minute to find a seed",
+		PerPoint = 0.04,
+		Max = 0.9,
+	},
+}
+Pets.PerkOrder = { "Growth", "Attraction", "Luck", "Coins", "SeedFinder" }
+
+Pets.StarMultipliers = { 0.8, 1, 1.25, 1.6, 2 }
+Pets.MaxStars = #Pets.StarMultipliers
+local SHINY_POINTS = 1.5
+local BABY_POINTS = 0.5
+local BABY_VALUE = 0.6
+Pets.BabyScale = 0.6
+
+Pets.FirstNames = {
+	"Pip",
+	"Kiwi",
+	"Sunny",
+	"Peaches",
+	"Mango",
+	"Biscuit",
+	"Pebble",
+	"Clover",
+	"Maple",
+	"Nugget",
+	"Willow",
+	"Tweety",
+	"Juniper",
+	"Hazel",
+	"Poppy",
+	"Sprout",
+	"Basil",
+	"Ziggy",
+	"Coco",
+	"Skye",
+	"Fig",
+	"Olive",
+	"Rusty",
+	"Dot",
+	"Echo",
+	"Breeze",
+	"Ember",
+	"Luna",
+	"Mochi",
+	"Sorbet",
+	"Taffy",
+	"Wren",
+}
+
+Pets.FamilyNames = {
+	"Featherby",
+	"Songwood",
+	"Pipwing",
+	"Hollowtree",
+	"Sunbeak",
+	"Mossnest",
+	"Bramblesong",
+	"Dewdrop",
+	"Thistledown",
+	"Puddlefoot",
+	"Skylark",
+	"Twigsworth",
+	"Honeyfeather",
+	"Acornhill",
+	"Cloudhop",
+	"Berrybright",
+}
+
+function Pets.Def(pet)
+	return Birds.Get(pet.Species)
+end
+
+function Pets.IsBaby(pet, now)
+	return pet.GrowsUpAt ~= nil and now < pet.GrowsUpAt
+end
+
+function Pets.DisplayName(pet)
+	if pet.Family then
+		return pet.Name .. " " .. pet.Family
+	end
+	return pet.Name
+end
+
+function Pets.StarText(stars)
+	return string.rep("⭐", math.clamp(stars or 1, 1, Pets.MaxStars))
+end
+
+-- How strong this pet's perk is.
+function Pets.Points(pet, now)
+	local def = Pets.Def(pet)
+	if not def then
+		return 0
+	end
+	local points = Rarities.Info[def.Rarity].PetPoints * Pets.StarMultipliers[pet.Stars or 1]
+	if pet.Shiny then
+		points *= SHINY_POINTS
+	end
+	if Pets.IsBaby(pet, now) then
+		points *= BABY_POINTS
+	end
+	return points
+end
+
+-- Coins the pet sells for, before the Haggler perk.
+function Pets.BaseValue(pet, now)
+	local def = Pets.Def(pet)
+	if not def then
+		return 0
+	end
+	local value = def.Reward * Pets.StarMultipliers[pet.Stars or 1]
+	if pet.Shiny then
+		value *= Config.ShinyMultiplier
+	end
+	if Pets.IsBaby(pet, now) then
+		value *= BABY_VALUE
+	end
+	return math.max(1, math.floor(value))
+end
+
+function Pets.SellPrice(pet, now, perks)
+	local bonus = perks and perks.Coins or 0
+	return math.floor(Pets.BaseValue(pet, now) * (1 + bonus))
+end
+
+-- Adds up the perks of every roaming pet.
+-- Returns { Growth = 0.12, Attraction = 0, ... } (0.12 = +12%)
+function Pets.ComputePerks(pets, now)
+	local points = {}
+	for _, perk in ipairs(Pets.PerkOrder) do
+		points[perk] = 0
+	end
+	for _, pet in pairs(pets) do
+		if pet.Equipped and not pet.Nest then
+			local def = Pets.Def(pet)
+			if def and points[def.Perk] then
+				points[def.Perk] += Pets.Points(pet, now)
+			end
+		end
+	end
+	local perks = {}
+	for perk, total in pairs(points) do
+		local info = Pets.Perks[perk]
+		perks[perk] = math.min(info.Max, total * info.PerPoint)
+	end
+	return perks
+end
+
+-- "+12% plants grow faster"
+function Pets.PerkText(perkId, amount)
+	local info = Pets.Perks[perkId]
+	return string.format("%s +%d%% %s", info.Icon, math.floor(amount * 100 + 0.5), info.Description)
+end
+
+-- Text for the perk a single pet gives.
+function Pets.PetPerkText(pet, now)
+	local def = Pets.Def(pet)
+	local info = def and Pets.Perks[def.Perk]
+	if not info then
+		return ""
+	end
+	local amount = math.min(info.Max, Pets.Points(pet, now) * info.PerPoint)
+	local percent = string.format("%.1f", amount * 100):gsub("%.0$", "")
+	return info.Icon .. " +" .. percent .. "%"
+end
+
+function Pets.BreedTime(species)
+	local def = Birds.Get(species)
+	return Rarities.Info[def.Rarity].BreedTime / math.max(Config.GrowthSpeed, 0.001)
+end
+
+function Pets.GrowUpTime(species)
+	local def = Birds.Get(species)
+	return Rarities.Info[def.Rarity].GrowUpTime / math.max(Config.GrowthSpeed, 0.001)
+end
+
+function Pets.CountPets(pets)
+	local count = 0
+	for _ in pairs(pets) do
+		count += 1
+	end
+	return count
+end
+
+function Pets.CountEquipped(pets)
+	local count = 0
+	for _, pet in pairs(pets) do
+		if pet.Equipped and not pet.Nest then
+			count += 1
+		end
+	end
+	return count
+end
+
+-- Sort order for lists: roaming first, then rarest, then most stars.
+function Pets.SortKeys(pets)
+	local ids = {}
+	for id in pairs(pets) do
+		table.insert(ids, id)
+	end
+	table.sort(ids, function(a, b)
+		local pa, pb = pets[a], pets[b]
+		if (pa.Equipped == true) ~= (pb.Equipped == true) then
+			return pa.Equipped == true
+		end
+		local ra = Rarities.Rank(Pets.Def(pa) and Pets.Def(pa).Rarity)
+		local rb = Rarities.Rank(Pets.Def(pb) and Pets.Def(pb).Rarity)
+		if ra ~= rb then
+			return ra > rb
+		end
+		if pa.Species ~= pb.Species then
+			return pa.Species < pb.Species
+		end
+		if (pa.Stars or 1) ~= (pb.Stars or 1) then
+			return (pa.Stars or 1) > (pb.Stars or 1)
+		end
+		return a < b
+	end)
+	return ids
+end
+
+return Pets
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="78">
         <Properties>
           <string name="Name">PlantBuilder</string>
           <string name="Source"><![CDATA[-- Builds plant models out of simple parts from a seed definition (see Seeds.lua).
@@ -4209,7 +6432,7 @@ return PlantBuilder
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="73">
+      <Item class="ModuleScript" referent="79">
         <Properties>
           <string name="Name">Rarities</string>
           <string name="Source"><![CDATA[-- Rarity tiers shared by seeds and birds.
@@ -4218,13 +6441,16 @@ local Rarities = {}
 
 Rarities.Order = { "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic" }
 
+-- PetPoints: how strong a pet's perk is
+-- BreedTime: seconds for an egg to hatch
+-- GrowUpTime: seconds for a baby to become an adult
 Rarities.Info = {
-	Common = { Rank = 1, Color = Color3.fromRGB(190, 190, 190) },
-	Uncommon = { Rank = 2, Color = Color3.fromRGB(95, 205, 95) },
-	Rare = { Rank = 3, Color = Color3.fromRGB(70, 150, 255) },
-	Epic = { Rank = 4, Color = Color3.fromRGB(175, 95, 255) },
-	Legendary = { Rank = 5, Color = Color3.fromRGB(255, 190, 40) },
-	Mythic = { Rank = 6, Color = Color3.fromRGB(255, 70, 110) },
+	Common = { Rank = 1, Color = Color3.fromRGB(190, 190, 190), PetPoints = 1, BreedTime = 120, GrowUpTime = 180 },
+	Uncommon = { Rank = 2, Color = Color3.fromRGB(95, 205, 95), PetPoints = 2, BreedTime = 240, GrowUpTime = 300 },
+	Rare = { Rank = 3, Color = Color3.fromRGB(70, 150, 255), PetPoints = 3, BreedTime = 480, GrowUpTime = 600 },
+	Epic = { Rank = 4, Color = Color3.fromRGB(175, 95, 255), PetPoints = 5, BreedTime = 720, GrowUpTime = 900 },
+	Legendary = { Rank = 5, Color = Color3.fromRGB(255, 190, 40), PetPoints = 8, BreedTime = 1200, GrowUpTime = 1500 },
+	Mythic = { Rank = 6, Color = Color3.fromRGB(255, 70, 110), PetPoints = 12, BreedTime = 1800, GrowUpTime = 2400 },
 }
 
 function Rarities.Color(rarity)
@@ -4241,7 +6467,7 @@ return Rarities
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="74">
+      <Item class="ModuleScript" referent="80">
         <Properties>
           <string name="Name">Seeds</string>
           <string name="Source"><![CDATA[-- Every seed sold in the shop. Better seeds cost more and take longer to
@@ -4536,7 +6762,7 @@ return Seeds
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="75">
+      <Item class="ModuleScript" referent="81">
         <Properties>
           <string name="Name">Util</string>
           <string name="Source"><![CDATA[-- Small helpers shared by the server and the client.
@@ -4609,7 +6835,7 @@ return Util
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="76">
+  <Item class="ServerScriptService" referent="82">
     <Properties>
       <string name="Name">ServerScriptService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -4621,15 +6847,16 @@ return Util
       <BinaryString name="Tags"></BinaryString>
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003ce</UniqueId>
     </Properties>
-    <Item class="Folder" referent="77">
+    <Item class="Folder" referent="83">
       <Properties>
         <string name="Name">BirdGardenServer</string>
       </Properties>
-      <Item class="ModuleScript" referent="78">
+      <Item class="ModuleScript" referent="84">
         <Properties>
           <string name="Name">BirdService</string>
-          <string name="Source"><![CDATA[-- Spawns birds on blooming plants, flies them in, lets the owner befriend
--- them for coins, and flies them away again.
+          <string name="Source"><![CDATA[-- Spawns birds on blooming plants and flies them in. When the owner
+-- befriends one it joins their aviary as a pet (see PetService); birds
+-- nobody befriends fly away again.
 
 local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -4640,10 +6867,11 @@ local BirdBuilder = require(Shared.BirdBuilder)
 local Birds = require(Shared.Birds)
 local Config = require(Shared.Config)
 local Net = require(Shared.Net)
+local Pets = require(Shared.Pets)
 local Rarities = require(Shared.Rarities)
 local Util = require(Shared.Util)
 
-local DataService = require(script.Parent.DataService)
+local PetService = require(script.Parent.PetService)
 
 local BirdService = {}
 
@@ -4740,8 +6968,9 @@ local function befriend(bird, player)
 	if bird.Leaving or not bird.Landed then
 		return
 	end
-	local data = DataService.Get(player)
-	if not data then
+	local def = bird.Def
+	local pet, petId, coins, firstTime = PetService.Befriend(player, def, bird.Shiny)
+	if not pet then
 		return
 	end
 	bird.Leaving = true
@@ -4750,48 +6979,63 @@ local function befriend(bird, player)
 		bird.Prompt = nil
 	end
 
-	local def = bird.Def
-	local reward = def.Reward * (bird.Shiny and Config.ShinyMultiplier or 1)
-	local firstTime = (data.Journal[def.Id] or 0) == 0
-	if firstTime then
-		reward *= Config.DiscoveryBonusMultiplier
-	end
-	data.Coins += reward
-	data.Journal[def.Id] = (data.Journal[def.Id] or 0) + 1
-	if bird.Shiny then
-		data.ShinyJournal[def.Id] = (data.ShinyJournal[def.Id] or 0) + 1
-	end
-	data.TotalBefriended += 1
-	DataService.Push(player)
-
-	local body = bird.Model.PrimaryPart
+	local model = bird.Model
+	local body = model.PrimaryPart
 	local position = body.CFrame.Position
-	Net.Effect:FireClient(
-		player,
-		position + Vector3.new(0, 2, 0),
-		"+" .. Util.FormatNumber(reward) .. " 🪙",
-		Color3.fromRGB(255, 220, 80)
-	)
 	Net.Effect:FireClient(player, position + Vector3.new(0, 1, 0), "❤", Color3.fromRGB(255, 110, 150))
-	if firstTime then
-		Net.Notify:FireClient(player, "📖 New bird discovered: " .. def.Name .. "! Discovery bonus!", "Rare")
-	end
-	if bird.Shiny then
-		Net.Notify:FireClient(
+	if coins > 0 then
+		Net.Effect:FireClient(
 			player,
-			"✨ You befriended a SHINY " .. def.Name .. "! x" .. Config.ShinyMultiplier .. " coins!",
-			"Rare"
+			position + Vector3.new(0, 2.5, 0),
+			"+" .. Util.FormatNumber(coins) .. " 🪙",
+			Color3.fromRGB(255, 220, 80)
 		)
 	end
 
-	-- a happy little hop, then off it goes
-	local hop = TweenService:Create(
-		body,
-		TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, true),
-		{ CFrame = body.CFrame + Vector3.new(0, 1.2, 0) }
-	)
-	hop:Play()
-	task.delay(0.45, flyAway, bird)
+	local title = (bird.Shiny and "✨ Shiny " or "") .. def.Name
+	if firstTime then
+		Net.Notify:FireClient(player, "📖 New bird discovered: " .. def.Name .. "! Discovery bonus coins!", "Rare")
+	end
+	if petId then
+		Net.Effect:FireClient(
+			player,
+			position + Vector3.new(0, 2, 0),
+			pet.Name .. " " .. Pets.StarText(pet.Stars),
+			bird.Shiny and Color3.fromRGB(255, 230, 120) or Rarities.Color(def.Rarity)
+		)
+		if bird.Shiny or Rarities.Rank(def.Rarity) >= Rarities.Rank("Rare") or pet.Stars >= 3 then
+			Net.Notify:FireClient(
+				player,
+				"🐦 " .. pet.Name .. " the " .. title .. " " .. Pets.StarText(pet.Stars) .. " joined your aviary!",
+				"Rare"
+			)
+		end
+		if pet.Equipped then
+			-- it stays as a pet: the client draws it hopping down from this spot
+			local marker = PetService.FindMarker(player, petId)
+			if marker then
+				marker:SetAttribute("SpawnAt", position)
+			end
+			bird.Gone = true
+			local state = bird.State
+			if state.Bird == bird then
+				state.Bird = nil
+				setHasBird(state, false)
+				BirdService.ScheduleNext(state, Util.Now())
+			end
+			model:Destroy()
+		else
+			-- no room to roam: it flies off to the aviary
+			task.delay(0.3, flyAway, bird)
+		end
+	else
+		Net.Notify:FireClient(
+			player,
+			"Your aviary is full, so " .. title .. " was sold for " .. Util.FormatNumber(coins) .. " coins.",
+			"Info"
+		)
+		task.delay(0.3, flyAway, bird)
+	end
 end
 
 local function land(bird)
@@ -4828,9 +7072,15 @@ local function spawnBird(state)
 		return
 	end
 
-	local entry = Util.WeightedPick(state.Seed.Birds, rng)
-	local def = Birds.Get(entry.Id)
-	local shiny = rng:NextNumber() < Config.ShinyChance
+	-- the Lucky perk tilts the odds toward rarer and shiny birds
+	local luck = PetService.GetPerks(state.Owner).Luck
+	local weights = {}
+	for _, entry in ipairs(state.Seed.Birds) do
+		local rank = Rarities.Rank(Birds.Get(entry.Id).Rarity)
+		table.insert(weights, { Id = entry.Id, Weight = entry.Weight * (1 + luck * (rank - 1)) })
+	end
+	local def = Birds.Get(Util.WeightedPick(weights, rng).Id)
+	local shiny = rng:NextNumber() < Config.ShinyChance * (1 + luck)
 	local model = BirdBuilder.Build(def, { Shiny = shiny })
 	model.Name = def.Id
 	model.ModelStreamingMode = Enum.ModelStreamingMode.Atomic
@@ -4902,7 +7152,8 @@ end
 
 function BirdService.ScheduleNext(state, now)
 	local range = state.Seed.BirdInterval
-	state.NextBirdAt = now + rng:NextNumber(range[1], range[2])
+	local attraction = PetService.GetPerks(state.Owner).Attraction
+	state.NextBirdAt = now + rng:NextNumber(range[1], range[2]) / (1 + attraction)
 end
 
 -- Called every tick for each blooming plant.
@@ -4945,7 +7196,7 @@ return BirdService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="79">
+      <Item class="ModuleScript" referent="85">
         <Properties>
           <string name="Name">DataService</string>
           <string name="Source"><![CDATA[-- Loads, holds and saves each player's progress.
@@ -4957,7 +7208,9 @@ local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared.Config)
+local Birds = require(Shared.Birds)
 local Net = require(Shared.Net)
+local Pets = require(Shared.Pets)
 local Seeds = require(Shared.Seeds)
 local Util = require(Shared.Util)
 
@@ -4981,10 +7234,14 @@ local function defaultData()
 	return {
 		Coins = Config.StartingCoins,
 		Seeds = Util.DeepCopy(Config.StartingSeeds),
-		Plants = {}, -- ["tileIndex"] = { Seed = id, PlantedAt = unixSeconds }
+		Plants = {}, -- ["tileIndex"] = { Seed = id, Grown = seconds of growth, SavedAt = unixSeconds }
 		Journal = {}, -- [birdId] = times befriended
 		ShinyJournal = {}, -- [birdId] = shiny times befriended
 		TotalBefriended = 0,
+		Pets = {}, -- [petId] = pet table, see Pets.lua
+		NextPetId = 1,
+		Nests = {}, -- ["nestIndex"] = { Species, ParentA, ParentB, StartedAt, HatchAt, Restore }
+		TotalHatched = 0,
 	}
 end
 
@@ -5004,6 +7261,28 @@ local function reconcile(data)
 	for tile, plant in pairs(data.Plants) do
 		if type(plant) ~= "table" or not Seeds.Get(plant.Seed) then
 			data.Plants[tile] = nil
+		end
+	end
+	for id, pet in pairs(data.Pets) do
+		if type(pet) ~= "table" or not Birds.Get(pet.Species) then
+			data.Pets[id] = nil
+		else
+			pet.Stars = math.clamp(math.floor(tonumber(pet.Stars) or 1), 1, Pets.MaxStars)
+			pet.Name = type(pet.Name) == "string" and pet.Name or Pets.FirstNames[1]
+		end
+	end
+	-- a nest is only valid while both parents are still sitting on it
+	for key, nest in pairs(data.Nests) do
+		local index = tonumber(key)
+		local a = type(nest) == "table" and data.Pets[nest.ParentA]
+		local b = type(nest) == "table" and data.Pets[nest.ParentB]
+		if not (index and a and b and a.Nest == index and b.Nest == index) then
+			data.Nests[key] = nil
+		end
+	end
+	for _, pet in pairs(data.Pets) do
+		if pet.Nest and not data.Nests[tostring(pet.Nest)] then
+			pet.Nest = nil
 		end
 	end
 	return data
@@ -5138,6 +7417,7 @@ function DataService.Snapshot(player)
 		return nil
 	end
 	local data = profile.Data
+	local now = Util.Now()
 	return {
 		Coins = data.Coins,
 		Seeds = data.Seeds,
@@ -5145,7 +7425,10 @@ function DataService.Snapshot(player)
 		ShinyJournal = data.ShinyJournal,
 		TotalBefriended = data.TotalBefriended,
 		SelectedSeed = profile.SelectedSeed,
-		ServerNow = Util.Now(),
+		Pets = data.Pets,
+		Nests = data.Nests,
+		Perks = Pets.ComputePerks(data.Pets, now),
+		ServerNow = now,
 	}
 end
 
@@ -5167,12 +7450,14 @@ return DataService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Script" referent="80">
+      <Item class="Script" referent="86">
         <Properties>
           <string name="Name">Main</string>
           <string name="Source"><![CDATA[-- Grow a Bird Garden: server entry point.
 -- Buy seeds, plant them, wait for them to grow, and befriend the birds they
 -- attract. Better seeds take longer to grow but attract rarer birds.
+-- Befriended birds become pets: they roam your garden giving perks, can be
+-- bred into families, sold for coins and traded with other players.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -5184,14 +7469,21 @@ local Util = require(Shared.Util)
 
 local BirdService = require(script.Parent.BirdService)
 local DataService = require(script.Parent.DataService)
+local NestService = require(script.Parent.NestService)
+local PetService = require(script.Parent.PetService)
 local PlotService = require(script.Parent.PlotService)
 local ShopService = require(script.Parent.ShopService)
+local TradeService = require(script.Parent.TradeService)
 local WorldBuilder = require(script.Parent.WorldBuilder)
 
 local world = WorldBuilder.Build()
 BirdService.Init(world.BirdsFolder)
 PlotService.Init(world.Plots)
 ShopService.Init()
+PetService.Init()
+PetService.SeedsChanged = PlotService.UpdatePlantPrompts
+PetService.IsInTrade = TradeService.IsOffered
+PetService.OnChanged(TradeService.Revalidate)
 
 local loaded = {} -- [Player] = true once their save has loaded
 
@@ -5223,7 +7515,9 @@ local function onPlayerAdded(player)
 	leaderstats.Parent = player
 
 	local plot = PlotService.Assign(player)
-	if not plot then
+	if plot then
+		NestService.SetupPlot(player)
+	else
 		Net.Notify:FireClient(player, "Every garden on this server is taken, sorry! Try another server.", "Error")
 	end
 
@@ -5245,6 +7539,8 @@ local function onPlayerAdded(player)
 	PlotService.LoadPlants(player)
 	PlotService.EnsureNotStuck(player)
 	loaded[player] = true
+	PetService.PlayerLoaded(player)
+	NestService.UpdateVisuals(player)
 	DataService.Push(player)
 	Net.ShopUpdated:FireClient(player, ShopService.Snapshot(player))
 	Net.Notify:FireClient(
@@ -5256,6 +7552,9 @@ end
 
 local function onPlayerRemoving(player)
 	loaded[player] = nil
+	TradeService.PlayerLeft(player)
+	NestService.ClearPlot(player)
+	PetService.PlayerLeft(player)
 	PlotService.Release(player)
 	DataService.Release(player)
 end
@@ -5308,6 +7607,46 @@ Net.SelectSeed.OnServerEvent:Connect(function(player, seedId)
 	end
 end)
 
+Net.PetAction.OnServerInvoke = function(player, action, a, b, c)
+	if not loaded[player] then
+		return false, "Your garden is still loading..."
+	end
+	if action == "Equip" then
+		return PetService.Equip(player, a)
+	elseif action == "Unequip" then
+		return PetService.Unequip(player, a)
+	elseif action == "Favorite" then
+		return PetService.SetFavorite(player, a, b == true)
+	elseif action == "Sell" then
+		return PetService.Sell(player, a)
+	elseif action == "SellBulk" then
+		return PetService.SellBulk(player, a)
+	elseif action == "Breed" then
+		return NestService.StartBreeding(player, a, b, c)
+	elseif action == "CancelNest" then
+		return NestService.Cancel(player, a)
+	end
+	return false, "Unknown action."
+end
+
+Net.TradeRequest.OnServerEvent:Connect(function(player, targetUserId)
+	if loaded[player] then
+		TradeService.Request(player, targetUserId)
+	end
+end)
+
+Net.TradeRespond.OnServerEvent:Connect(function(player, fromUserId, accept)
+	if loaded[player] then
+		TradeService.Respond(player, fromUserId, accept)
+	end
+end)
+
+Net.TradeUpdate.OnServerEvent:Connect(function(player, action, value)
+	if loaded[player] then
+		TradeService.Update(player, action, value)
+	end
+end)
+
 Net.Teleport.OnServerEvent:Connect(function(player, target)
 	if target == "Garden" then
 		PlotService.TeleportToPlot(player)
@@ -5329,9 +7668,16 @@ task.spawn(function()
 		if not ok then
 			warn("[BirdGarden] Plot tick failed:", err)
 		end
-		ok, err = pcall(ShopService.Tick, now)
-		if not ok then
-			warn("[BirdGarden] Shop tick failed:", err)
+		for name, tick in pairs({
+			Shop = ShopService.Tick,
+			Pet = PetService.Tick,
+			Nest = NestService.Tick,
+			Trade = TradeService.Tick,
+		}) do
+			ok, err = pcall(tick, now)
+			if not ok then
+				warn("[BirdGarden] " .. name .. " tick failed:", err)
+			end
 		end
 		task.wait(0.5)
 	end
@@ -5348,7 +7694,852 @@ end)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="81">
+      <Item class="ModuleScript" referent="87">
+        <Properties>
+          <string name="Name">NestService</string>
+          <string name="Source"><![CDATA[-- Breeding. Put two adult birds of the same species in a nest and they keep
+-- an egg warm until it hatches into a baby. The baby joins their family,
+-- inherits their stars (sometimes one better) and has a much better chance of
+-- being shiny if its parents are.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Birds = require(Shared.Birds)
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+local Pets = require(Shared.Pets)
+local Util = require(Shared.Util)
+
+local DataService = require(script.Parent.DataService)
+local PetService = require(script.Parent.PetService)
+local PlotService = require(script.Parent.PlotService)
+
+local NestService = {}
+
+local rng = Random.new()
+
+------------------------------------------------------------------------------
+-- Visuals
+
+local function setEgg(nest, species)
+	local egg = nest.Model:FindFirstChild("Egg")
+	if egg and egg:GetAttribute("Species") == species then
+		return
+	end
+	if egg then
+		egg:Destroy()
+	end
+	if not species then
+		return
+	end
+	local look = Birds.Get(species).Look
+	egg = Instance.new("Part")
+	egg.Name = "Egg"
+	egg.Size = Vector3.new(1.1, 1.4, 1.1)
+	egg.CFrame = nest.CFrame * CFrame.new(0, 1.25, 0)
+	egg.Color = look.Belly or look.Body
+	egg.Material = look.Material or Enum.Material.SmoothPlastic
+	egg.Anchored = true
+	egg.CanCollide = false
+	egg.CanQuery = false
+	egg.CanTouch = false
+	egg:SetAttribute("Species", species)
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.Sphere
+	mesh.Parent = egg
+	-- a few speckles in the bird's colours
+	for i = 1, 4 do
+		local angle = i * 1.9
+		local spot = Instance.new("Part")
+		spot.Name = "Speckle"
+		spot.Shape = Enum.PartType.Ball
+		spot.Size = Vector3.new(0.22, 0.22, 0.22)
+		spot.CFrame = egg.CFrame * CFrame.new(math.cos(angle) * 0.5, (i - 2.5) * 0.22, math.sin(angle) * 0.5)
+		spot.Color = look.Wing or look.Head or look.Body
+		spot.Anchored = true
+		spot.CanCollide = false
+		spot.CanQuery = false
+		spot.CanTouch = false
+		spot.Parent = egg
+	end
+	egg.Parent = nest.Model
+end
+
+function NestService.UpdateVisuals(player)
+	local plot = PlotService.GetPlot(player)
+	if not plot then
+		return
+	end
+	local data = DataService.Get(player)
+	for index, nest in ipairs(plot.Nests) do
+		local entry = data and data.Nests[tostring(index)]
+		local base = nest.Base
+		base:SetAttribute("Species", entry and entry.Species or "")
+		base:SetAttribute("HatchAt", entry and entry.HatchAt or 0)
+		base:SetAttribute("Waiting", entry ~= nil and entry.Waiting == true)
+		local label = base.NestStatus.Status
+		label.Text = entry and ("🥚 " .. Birds.Get(entry.Species).Name .. " egg") or "🪺 Empty nest"
+		setEgg(nest, entry and entry.Species)
+	end
+end
+
+local function clearPrompts(nest)
+	for _, child in ipairs(nest.Base:GetChildren()) do
+		if child:IsA("ProximityPrompt") then
+			child:Destroy()
+		end
+	end
+end
+
+-- Called when a player gets a plot.
+function NestService.SetupPlot(player)
+	local plot = PlotService.GetPlot(player)
+	if not plot then
+		return
+	end
+	for index, nest in ipairs(plot.Nests) do
+		clearPrompts(nest)
+		local prompt = Instance.new("ProximityPrompt")
+		prompt.Name = "NestPrompt"
+		prompt.ActionText = "Open Nest"
+		prompt.ObjectText = "Nest " .. index
+		prompt.KeyboardKeyCode = Enum.KeyCode.E
+		prompt.GamepadKeyCode = Enum.KeyCode.ButtonX
+		prompt.HoldDuration = 0
+		prompt.MaxActivationDistance = 10
+		prompt.RequiresLineOfSight = false
+		prompt:SetAttribute("OwnerUserId", player.UserId)
+		prompt.Triggered:Connect(function(who)
+			if who == player then
+				Net.OpenNest:FireClient(player, index)
+			end
+		end)
+		prompt.Parent = nest.Base
+	end
+	NestService.UpdateVisuals(player)
+end
+
+-- Called before a player's plot is released.
+function NestService.ClearPlot(player)
+	local plot = PlotService.GetPlot(player)
+	if not plot then
+		return
+	end
+	for _, nest in ipairs(plot.Nests) do
+		clearPrompts(nest)
+		setEgg(nest, nil)
+		nest.Base:SetAttribute("Species", "")
+		nest.Base:SetAttribute("HatchAt", 0)
+		nest.Base:SetAttribute("Waiting", false)
+		nest.Base.NestStatus.Status.Text = "🪺 Empty nest"
+	end
+end
+
+------------------------------------------------------------------------------
+-- Breeding
+
+local function eggsInProgress(data)
+	local count = 0
+	for _ in pairs(data.Nests) do
+		count += 1
+	end
+	return count
+end
+
+-- Returns ok, message
+function NestService.StartBreeding(player, petIdA, petIdB, nestIndex)
+	local data = DataService.Get(player)
+	if not data or not PlotService.GetPlot(player) then
+		return false, "You need a garden to breed birds."
+	end
+	if type(petIdA) ~= "string" or type(petIdB) ~= "string" or petIdA == petIdB then
+		return false, "Pick two different birds."
+	end
+	local a, b = data.Pets[petIdA], data.Pets[petIdB]
+	if not a or not b then
+		return false, "Those birds aren't in your aviary."
+	end
+	if a.Species ~= b.Species then
+		return false, "Only two birds of the same kind can raise a family."
+	end
+	local now = Util.Now()
+	for _, pet in ipairs({ a, b }) do
+		if Pets.IsBaby(pet, now) then
+			return false, pet.Name .. " is still a baby. Wait for it to grow up."
+		elseif pet.Nest then
+			return false, pet.Name .. " is already sitting on an egg."
+		end
+	end
+	if PetService.IsInTrade(player, petIdA) or PetService.IsInTrade(player, petIdB) then
+		return false, "Take those birds out of your trade first."
+	end
+	if Pets.CountPets(data.Pets) + eggsInProgress(data) >= Config.MaxPets then
+		return false, "Your aviary is full. Make room for the baby first."
+	end
+
+	if nestIndex ~= nil then
+		nestIndex = tonumber(nestIndex)
+		if
+			not nestIndex
+			or nestIndex ~= math.floor(nestIndex)
+			or nestIndex < 1
+			or nestIndex > Config.NestCount
+			or data.Nests[tostring(nestIndex)]
+		then
+			nestIndex = nil
+		end
+	end
+	if not nestIndex then
+		for index = 1, Config.NestCount do
+			if not data.Nests[tostring(index)] then
+				nestIndex = index
+				break
+			end
+		end
+	end
+	if not nestIndex then
+		return false, "All your nests are busy."
+	end
+
+	local hatchAt = now + Pets.BreedTime(a.Species)
+	data.Nests[tostring(nestIndex)] = {
+		Species = a.Species,
+		ParentA = petIdA,
+		ParentB = petIdB,
+		StartedAt = math.floor(now),
+		HatchAt = hatchAt,
+		Restore = { A = a.Equipped == true, B = b.Equipped == true },
+	}
+	a.Equipped, b.Equipped = false, false
+	a.Nest, b.Nest = nestIndex, nestIndex
+	NestService.UpdateVisuals(player)
+	PetService.Refresh(player)
+	return true,
+		a.Name
+			.. " and "
+			.. b.Name
+			.. " are keeping an egg warm. It hatches in "
+			.. Util.FormatTime(hatchAt - now)
+			.. "!"
+end
+
+local function freeParents(data, entry)
+	local restore = entry.Restore or {}
+	for _, pair in ipairs({ { entry.ParentA, restore.A }, { entry.ParentB, restore.B } }) do
+		local pet = data.Pets[pair[1]]
+		if pet then
+			pet.Nest = nil
+			if pair[2] and Pets.CountEquipped(data.Pets) < Config.MaxEquippedPets then
+				pet.Equipped = true
+			end
+		end
+	end
+end
+
+function NestService.Cancel(player, nestIndex)
+	local data = DataService.Get(player)
+	local key = tostring(tonumber(nestIndex) or "")
+	local entry = data and data.Nests[key]
+	if not entry then
+		return false, "That nest is empty."
+	end
+	data.Nests[key] = nil
+	freeParents(data, entry)
+	NestService.UpdateVisuals(player)
+	PetService.Refresh(player)
+	return true, "The parents left the nest. No egg this time."
+end
+
+local function rollStars(a, b)
+	local stars = math.floor(((a.Stars or 1) + (b.Stars or 1)) / 2 + 0.5)
+	if rng:NextNumber() < Config.BredStarUpChance then
+		stars += 1
+	end
+	return math.clamp(stars, 1, Pets.MaxStars)
+end
+
+local function hatch(player, data, key, entry, now)
+	local a, b = data.Pets[entry.ParentA], data.Pets[entry.ParentB]
+	if not a or not b then
+		-- a parent went missing; just clear the nest
+		data.Nests[key] = nil
+		freeParents(data, entry)
+		return true
+	end
+	if Pets.CountPets(data.Pets) >= Config.MaxPets then
+		if not entry.Waiting then
+			entry.Waiting = true
+			Net.Notify:FireClient(
+				player,
+				"🥚 Your egg is ready, but your aviary is full! Sell or trade a bird to make room.",
+				"Error"
+			)
+			NestService.UpdateVisuals(player)
+		end
+		return false
+	end
+
+	local newFamily = false
+	local family = a.Family or b.Family
+	if not family then
+		family = PetService.RandomFamilyName()
+		newFamily = true
+	end
+	a.Family = a.Family or family
+	b.Family = b.Family or family
+
+	local shinyParents = (a.Shiny and 1 or 0) + (b.Shiny and 1 or 0)
+	local baby = PetService.NewPet({
+		Species = entry.Species,
+		Family = family,
+		Stars = rollStars(a, b),
+		Shiny = rng:NextNumber() < Config.BredShinyChance[shinyParents + 1],
+		Generation = math.max(a.Generation or 0, b.Generation or 0) + 1,
+		Parents = a.Name .. " & " .. b.Name,
+		ParentIds = { entry.ParentA, entry.ParentB },
+		GrowsUpAt = now + Pets.GrowUpTime(entry.Species),
+	})
+	local babyId = PetService.AddPet(data, baby)
+	data.Nests[key] = nil
+	data.TotalHatched = (data.TotalHatched or 0) + 1
+	freeParents(data, entry)
+	if Pets.CountEquipped(data.Pets) < Config.MaxEquippedPets then
+		baby.Equipped = true
+	end
+
+	local def = Birds.Get(entry.Species)
+	if newFamily then
+		Net.Notify:FireClient(
+			player,
+			"🏡 " .. a.Name .. " and " .. b.Name .. " started the " .. family .. " family!",
+			"Rare"
+		)
+	end
+	Net.Notify:FireClient(
+		player,
+		"🐣 A baby "
+			.. (baby.Shiny and "✨ Shiny " or "")
+			.. def.Name
+			.. " hatched! Say hi to "
+			.. Pets.DisplayName(baby)
+			.. " "
+			.. Pets.StarText(baby.Stars),
+		"Rare"
+	)
+	local plot = PlotService.GetPlot(player)
+	local nest = plot and plot.Nests[tonumber(key)]
+	if nest then
+		Net.Effect:FireClient(
+			player,
+			nest.CFrame.Position + Vector3.new(0, 3, 0),
+			"🐣 Hatched!",
+			Color3.fromRGB(255, 240, 150)
+		)
+	end
+	return true, babyId
+end
+
+function NestService.Tick(now)
+	for _, player in ipairs(Players:GetPlayers()) do
+		local data = DataService.Get(player)
+		if data and next(data.Nests) ~= nil then
+			local changed = false
+			for key, entry in pairs(data.Nests) do
+				if now >= entry.HatchAt and hatch(player, data, key, entry, now) then
+					changed = true
+				end
+			end
+			if changed then
+				NestService.UpdateVisuals(player)
+				PetService.Refresh(player)
+			end
+		end
+	end
+end
+
+return NestService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="88">
+        <Properties>
+          <string name="Name">PetService</string>
+          <string name="Source"><![CDATA[-- Pet birds: befriended birds join your aviary, roam your garden when
+-- equipped (giving perks), can be sold, and grow up from babies.
+--
+-- Roaming pets are drawn by each client. The server only publishes a marker
+-- (a Folder with attributes) per roaming or nesting pet in
+-- ReplicatedStorage.BirdGardenPets.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Birds = require(Shared.Birds)
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+local Pets = require(Shared.Pets)
+local Rarities = require(Shared.Rarities)
+local Seeds = require(Shared.Seeds)
+local Util = require(Shared.Util)
+
+local DataService = require(script.Parent.DataService)
+
+local PetService = {}
+
+local rng = Random.new()
+local markers -- Folder of roaming pet markers
+local perkCache = {} -- [Player] = perks table
+local nextSeedRoll = {} -- [Player] = unix time
+local changeListeners = {}
+
+-- Set by Main: called after a pet finds a seed (so plant prompts update).
+PetService.SeedsChanged = function(_player) end
+-- Set by Main: returns true if the pet is offered in an active trade.
+PetService.IsInTrade = function(_player, _petId)
+	return false
+end
+
+------------------------------------------------------------------------------
+-- Helpers
+
+function PetService.MarkerName(player, petId)
+	return player.UserId .. "_" .. petId
+end
+
+local function randomName()
+	return Pets.FirstNames[rng:NextInteger(1, #Pets.FirstNames)]
+end
+
+function PetService.RandomFamilyName()
+	return Pets.FamilyNames[rng:NextInteger(1, #Pets.FamilyNames)]
+end
+
+local function rollWildStars()
+	local weights = {}
+	for stars, weight in ipairs(Config.WildStarWeights) do
+		table.insert(weights, { Stars = stars, Weight = weight })
+	end
+	return Util.WeightedPick(weights, rng).Stars
+end
+
+function PetService.NewPet(fields)
+	local pet = {
+		Name = randomName(),
+		Stars = 1,
+		Shiny = false,
+		Generation = 0,
+		CaughtAt = os.time(),
+	}
+	for key, value in pairs(fields) do
+		pet[key] = value
+	end
+	return pet
+end
+
+-- Adds a pet to the data and returns its new id.
+function PetService.AddPet(data, pet)
+	local id = "P" .. data.NextPetId
+	data.NextPetId += 1
+	data.Pets[id] = pet
+	return id
+end
+
+function PetService.OnChanged(listener)
+	table.insert(changeListeners, listener)
+end
+
+function PetService.GetPerks(player)
+	local perks = perkCache[player]
+	if not perks then
+		local data = DataService.Get(player)
+		perks = Pets.ComputePerks(data and data.Pets or {}, Util.Now())
+		perkCache[player] = perks
+	end
+	return perks
+end
+
+------------------------------------------------------------------------------
+-- Roaming markers
+
+local function findRoamingParent(player, data, pet)
+	-- babies tag along behind a parent (or any family member) out in the garden
+	if type(pet.ParentIds) == "table" then
+		for _, parentId in ipairs(pet.ParentIds) do
+			local parent = data.Pets[parentId]
+			if parent and parent.Equipped and not parent.Nest then
+				return PetService.MarkerName(player, parentId)
+			end
+		end
+	end
+	if pet.Family then
+		for id, other in pairs(data.Pets) do
+			if
+				other ~= pet
+				and other.Family == pet.Family
+				and other.Equipped
+				and not other.Nest
+				and not other.GrowsUpAt
+			then
+				return PetService.MarkerName(player, id)
+			end
+		end
+	end
+	return ""
+end
+
+function PetService.SyncRoaming(player)
+	local data = DataService.Get(player)
+	local plotId = player:GetAttribute("PlotId")
+	local now = Util.Now()
+	local wanted = {}
+	if data and plotId and player.Parent == Players then
+		for id, pet in pairs(data.Pets) do
+			if pet.Nest or pet.Equipped then
+				wanted[PetService.MarkerName(player, id)] = id
+			end
+		end
+	end
+
+	for _, marker in ipairs(markers:GetChildren()) do
+		if marker:GetAttribute("OwnerUserId") == player.UserId and not wanted[marker.Name] then
+			marker:Destroy()
+		end
+	end
+
+	for name, id in pairs(wanted) do
+		local pet = data.Pets[id]
+		local marker = markers:FindFirstChild(name)
+		local isNew = marker == nil
+		if isNew then
+			marker = Instance.new("Folder")
+			marker.Name = name
+		end
+		marker:SetAttribute("PetId", id)
+		marker:SetAttribute("OwnerUserId", player.UserId)
+		marker:SetAttribute("PlotId", plotId)
+		marker:SetAttribute("Species", pet.Species)
+		marker:SetAttribute("Shiny", pet.Shiny == true)
+		marker:SetAttribute("Stars", pet.Stars or 1)
+		marker:SetAttribute("Baby", Pets.IsBaby(pet, now))
+		marker:SetAttribute("DisplayName", Pets.DisplayName(pet))
+		marker:SetAttribute("Mode", pet.Nest and "Nest" or "Roam")
+		marker:SetAttribute("NestIndex", pet.Nest or 0)
+		marker:SetAttribute("Follow", Pets.IsBaby(pet, now) and findRoamingParent(player, data, pet) or "")
+		if isNew then
+			marker.Parent = markers
+		end
+	end
+end
+
+function PetService.FindMarker(player, petId)
+	return markers:FindFirstChild(PetService.MarkerName(player, petId))
+end
+
+function PetService.RemoveRoaming(player)
+	for _, marker in ipairs(markers:GetChildren()) do
+		if marker:GetAttribute("OwnerUserId") == player.UserId then
+			marker:Destroy()
+		end
+	end
+end
+
+-- Call after any change to a player's pets.
+function PetService.Refresh(player)
+	local data = DataService.Get(player)
+	if not data then
+		return
+	end
+	perkCache[player] = Pets.ComputePerks(data.Pets, Util.Now())
+	PetService.SyncRoaming(player)
+	for _, listener in ipairs(changeListeners) do
+		listener(player)
+	end
+	DataService.Push(player)
+end
+
+------------------------------------------------------------------------------
+-- Catching
+
+-- A befriended bird joins the aviary. Returns pet, petId (nil if the aviary
+-- was full and it was sold instead), coins earned, first time seen.
+function PetService.Befriend(player, def, shiny)
+	local data = DataService.Get(player)
+	if not data then
+		return nil
+	end
+	local now = Util.Now()
+	local perks = PetService.GetPerks(player)
+	local pet = PetService.NewPet({ Species = def.Id, Shiny = shiny, Stars = rollWildStars() })
+
+	local firstTime = (data.Journal[def.Id] or 0) == 0
+	data.Journal[def.Id] = (data.Journal[def.Id] or 0) + 1
+	if shiny then
+		data.ShinyJournal[def.Id] = (data.ShinyJournal[def.Id] or 0) + 1
+	end
+	data.TotalBefriended += 1
+
+	local coins = 0
+	if firstTime then
+		coins += math.floor(Pets.BaseValue(pet, now) * Config.DiscoveryBonusMultiplier * (1 + perks.Coins))
+	end
+	local id
+	if Pets.CountPets(data.Pets) >= Config.MaxPets then
+		coins += Pets.SellPrice(pet, now, perks)
+	else
+		id = PetService.AddPet(data, pet)
+		if Pets.CountEquipped(data.Pets) < Config.MaxEquippedPets then
+			pet.Equipped = true
+		end
+	end
+	data.Coins += coins
+	PetService.Refresh(player)
+	return pet, id, coins, firstTime
+end
+
+------------------------------------------------------------------------------
+-- Actions from the aviary window. Each returns ok, message.
+
+local function getPet(player, petId)
+	local data = DataService.Get(player)
+	if not data or type(petId) ~= "string" then
+		return nil, nil
+	end
+	return data.Pets[petId], data
+end
+
+function PetService.Equip(player, petId)
+	local pet, data = getPet(player, petId)
+	if not pet then
+		return false, "That bird isn't in your aviary."
+	end
+	if pet.Nest then
+		return false, pet.Name .. " is busy sitting on an egg."
+	end
+	if pet.Equipped then
+		return true, pet.Name .. " is already out."
+	end
+	if Pets.CountEquipped(data.Pets) >= Config.MaxEquippedPets then
+		return false, "Only " .. Config.MaxEquippedPets .. " birds can roam at once. Put one away first."
+	end
+	pet.Equipped = true
+	PetService.Refresh(player)
+	return true, pet.Name .. " is exploring your garden!"
+end
+
+function PetService.Unequip(player, petId)
+	local pet = getPet(player, petId)
+	if not pet then
+		return false, "That bird isn't in your aviary."
+	end
+	pet.Equipped = false
+	PetService.Refresh(player)
+	return true, pet.Name .. " went back to the aviary."
+end
+
+function PetService.SetFavorite(player, petId, favorite)
+	local pet = getPet(player, petId)
+	if not pet then
+		return false, "That bird isn't in your aviary."
+	end
+	if favorite and PetService.IsInTrade(player, petId) then
+		return false, "Take " .. pet.Name .. " out of the trade first."
+	end
+	pet.Favorite = favorite == true
+	PetService.Refresh(player)
+	return true,
+		pet.Favorite and (pet.Name .. " is a favorite. Favorites can't be sold or traded.")
+			or (pet.Name .. " is no longer a favorite.")
+end
+
+local function sellBlocker(player, pet, petId)
+	if pet.Favorite then
+		return pet.Name .. " is a favorite. Unfavorite it to sell."
+	elseif pet.Nest then
+		return pet.Name .. " is busy sitting on an egg."
+	elseif PetService.IsInTrade(player, petId) then
+		return pet.Name .. " is part of a trade."
+	end
+	return nil
+end
+
+function PetService.Sell(player, petId)
+	local pet, data = getPet(player, petId)
+	if not pet then
+		return false, "That bird isn't in your aviary."
+	end
+	local blocker = sellBlocker(player, pet, petId)
+	if blocker then
+		return false, blocker
+	end
+	local price = Pets.SellPrice(pet, Util.Now(), PetService.GetPerks(player))
+	data.Pets[petId] = nil
+	data.Coins += price
+	PetService.Refresh(player)
+	return true, "Sold " .. Pets.DisplayName(pet) .. " for " .. Util.FormatNumber(price) .. " coins."
+end
+
+-- Sells every bird at or below a rarity that isn't out, nesting, a favorite or in a trade.
+function PetService.SellBulk(player, maxRarity)
+	local data = DataService.Get(player)
+	local maxRank = Rarities.Rank(maxRarity)
+	if not data or maxRank == 0 then
+		return false, "Pick a rarity to sell."
+	end
+	local now = Util.Now()
+	local perks = PetService.GetPerks(player)
+	local sold, coins = 0, 0
+	for id, pet in pairs(data.Pets) do
+		local def = Pets.Def(pet)
+		if def and Rarities.Rank(def.Rarity) <= maxRank and not pet.Equipped and not sellBlocker(player, pet, id) then
+			coins += Pets.SellPrice(pet, now, perks)
+			sold += 1
+			data.Pets[id] = nil
+		end
+	end
+	if sold == 0 then
+		return false, "No birds to sell. Birds that are out, nesting or favorites are kept."
+	end
+	data.Coins += coins
+	PetService.Refresh(player)
+	return true, "Sold " .. sold .. " birds for " .. Util.FormatNumber(coins) .. " coins."
+end
+
+------------------------------------------------------------------------------
+-- Lifecycle and ticking
+
+function PetService.Init()
+	markers = ReplicatedStorage:FindFirstChild("BirdGardenPets")
+	if not markers then
+		markers = Instance.new("Folder")
+		markers.Name = "BirdGardenPets"
+		markers.Parent = ReplicatedStorage
+	end
+end
+
+function PetService.PlayerLoaded(player)
+	nextSeedRoll[player] = Util.Now() + Config.SeedFinderInterval
+	PetService.Refresh(player)
+end
+
+function PetService.PlayerLeft(player)
+	PetService.RemoveRoaming(player)
+	perkCache[player] = nil
+	nextSeedRoll[player] = nil
+end
+
+local function pickFoundSeed(luck)
+	local weights = {}
+	for _, seed in ipairs(Seeds.List) do
+		local rank = Rarities.Rank(seed.Rarity)
+		table.insert(weights, { Seed = seed, Weight = seed.Stock.Chance * (1 + luck * (rank - 1)) })
+	end
+	return Util.WeightedPick(weights, rng).Seed
+end
+
+local function pickSeedFinder(data, now)
+	local weights = {}
+	for id, pet in pairs(data.Pets) do
+		local def = Pets.Def(pet)
+		if pet.Equipped and not pet.Nest and def and def.Perk == "SeedFinder" then
+			table.insert(weights, { Id = id, Pet = pet, Weight = Pets.Points(pet, now) })
+		end
+	end
+	if #weights == 0 then
+		return nil
+	end
+	return Util.WeightedPick(weights, rng)
+end
+
+local function rollSeedFinder(player, data, now)
+	local perks = PetService.GetPerks(player)
+	if perks.SeedFinder <= 0 or rng:NextNumber() >= perks.SeedFinder then
+		return
+	end
+	local finder = pickSeedFinder(data, now)
+	if not finder then
+		return
+	end
+	local seed = pickFoundSeed(perks.Luck)
+	data.Seeds[seed.Id] = (data.Seeds[seed.Id] or 0) + 1
+	DataService.EnsureSelection(player)
+	PetService.SeedsChanged(player)
+	DataService.Push(player)
+	Net.PetEvent:FireClient(
+		player,
+		PetService.MarkerName(player, finder.Id),
+		"🎒 Found a " .. seed.Name .. " seed!",
+		Rarities.Color(seed.Rarity)
+	)
+	Net.Notify:FireClient(
+		player,
+		"🎒 "
+			.. finder.Pet.Name
+			.. " the "
+			.. Birds.Get(finder.Pet.Species).Name
+			.. " found a "
+			.. seed.Icon
+			.. " "
+			.. seed.Name
+			.. " seed!",
+		Rarities.Rank(seed.Rarity) >= Rarities.Rank("Rare") and "Rare" or "Success"
+	)
+end
+
+function PetService.Tick(now)
+	for player, rollAt in pairs(nextSeedRoll) do
+		local data = DataService.Get(player)
+		if data then
+			-- babies growing up
+			local grewUp = false
+			for _, pet in pairs(data.Pets) do
+				if pet.GrowsUpAt and now >= pet.GrowsUpAt then
+					pet.GrowsUpAt = nil
+					grewUp = true
+					Net.Notify:FireClient(
+						player,
+						"🐦 "
+							.. Pets.DisplayName(pet)
+							.. " grew up into a fine "
+							.. Birds.Get(pet.Species).Name
+							.. "!",
+						"Success"
+					)
+				end
+			end
+			if grewUp then
+				PetService.Refresh(player)
+			end
+
+			if now >= rollAt then
+				nextSeedRoll[player] = now + Config.SeedFinderInterval
+				rollSeedFinder(player, data, now)
+			end
+		end
+	end
+end
+
+-- What the other player sees about a pet in a trade.
+function PetService.Summary(pet, id)
+	local now = Util.Now()
+	return {
+		Id = id,
+		Species = pet.Species,
+		Name = Pets.DisplayName(pet),
+		Stars = pet.Stars or 1,
+		Shiny = pet.Shiny == true,
+		Baby = Pets.IsBaby(pet, now),
+		Value = Pets.BaseValue(pet, now),
+	}
+end
+
+return PetService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="89">
         <Properties>
           <string name="Name">PlotService</string>
           <string name="Source"><![CDATA[-- Owns the garden plots: assigning them to players, planting, digging up,
@@ -5367,6 +8558,7 @@ local Util = require(Shared.Util)
 
 local BirdService = require(script.Parent.BirdService)
 local DataService = require(script.Parent.DataService)
+local PetService = require(script.Parent.PetService)
 
 local PlotService = {}
 
@@ -5525,8 +8717,7 @@ local function rebuildModel(state)
 	local model = PlantBuilder.Build(state.Seed, state.Stage)
 	model.Name = "Plant" .. state.TileIndex
 	model:SetAttribute("SeedId", state.Seed.Id)
-	model:SetAttribute("PlantedAt", state.PlantedAt)
-	model:SetAttribute("GrowTime", state.GrowTime)
+	model:SetAttribute("GrowTime", state.Seed.GrowTime)
 	model:SetAttribute("Stage", state.Stage)
 	model:SetAttribute("OwnerUserId", state.Owner.UserId)
 	model:SetAttribute("HasBird", hadBird == true)
@@ -5536,27 +8727,45 @@ local function rebuildModel(state)
 	model:AddTag("BirdGardenPlant")
 	model.Parent = state.Plot.PlantsFolder
 	state.Model = model
+	state.Speed = nil -- make the next growth update refresh the timer attributes
 end
 
--- Moves a plant to its current growth stage. Returns true if it just bloomed.
-local function updateGrowth(state, now)
-	local progress = (now - state.PlantedAt) / state.GrowTime
-	local stage = stageFor(progress)
-	if stage == state.Stage then
-		return false
+-- How fast a player's plants grow (Green Thumb pets make them faster).
+local function growthSpeed(player)
+	return math.max(Config.GrowthSpeed, 0.001) * (1 + PetService.GetPerks(player).Growth)
+end
+
+-- Adds growth since the last update and moves the plant to its current
+-- stage. Returns true if it just bloomed.
+local function updateGrowth(state, now, speed)
+	state.Grown = math.min(state.Seed.GrowTime, state.Grown + math.max(0, now - state.LastUpdate) * speed)
+	state.LastUpdate = now
+	state.Saved.Grown = state.Grown
+	state.Saved.SavedAt = math.floor(now)
+
+	local stage = stageFor(state.Grown / state.Seed.GrowTime)
+	local bloomed = false
+	if stage ~= state.Stage then
+		bloomed = state.Stage ~= 0 and state.Stage < BLOOM_STAGE and stage == BLOOM_STAGE
+		state.Stage = stage
+		rebuildModel(state)
 	end
-	local wasGrowing = state.Stage ~= 0 and state.Stage < BLOOM_STAGE
-	state.Stage = stage
-	rebuildModel(state)
-	return wasGrowing and stage == BLOOM_STAGE
+	if state.Speed ~= speed then
+		-- the client works out the countdown from these
+		state.Speed = speed
+		state.Model:SetAttribute("Grown", state.Grown)
+		state.Model:SetAttribute("GrownAt", now)
+		state.Model:SetAttribute("Speed", speed)
+	end
+	return bloomed
 end
 
-local function createPlant(plot, index, seedId, plantedAt, now)
-	local seed = Seeds.Get(seedId)
+local function createPlant(plot, index, saved, grown, now)
 	local state = {
-		Seed = seed,
-		PlantedAt = plantedAt,
-		GrowTime = seed.GrowTime / math.max(Config.GrowthSpeed, 0.001),
+		Seed = Seeds.Get(saved.Seed),
+		Saved = saved, -- the entry in the player's data, kept up to date
+		Grown = grown,
+		LastUpdate = now,
 		Stage = 0,
 		Owner = plot.Owner,
 		Plot = plot,
@@ -5564,7 +8773,7 @@ local function createPlant(plot, index, seedId, plantedAt, now)
 		Tile = plot.Tiles[index],
 	}
 	plot.Plants[index] = state
-	updateGrowth(state, now)
+	updateGrowth(state, now, growthSpeed(plot.Owner))
 	setDigPrompt(plot, index)
 	return state
 end
@@ -5637,10 +8846,20 @@ function PlotService.LoadPlants(player)
 		return
 	end
 	local now = Util.Now()
+	local speed = growthSpeed(player)
 	for key, saved in pairs(data.Plants) do
 		local index = tonumber(key)
 		if index and plot.Tiles[index] and Seeds.Get(saved.Seed) then
-			createPlant(plot, index, saved.Seed, tonumber(saved.PlantedAt) or now, now)
+			-- plants keep growing while you're away
+			local grown
+			if tonumber(saved.Grown) then
+				grown = saved.Grown + math.max(0, now - (tonumber(saved.SavedAt) or now)) * speed
+			else
+				-- saves from before pets existed stored when the seed was planted
+				grown = math.max(0, now - (tonumber(saved.PlantedAt) or now)) * math.max(Config.GrowthSpeed, 0.001)
+				saved.PlantedAt = nil
+			end
+			createPlant(plot, index, saved, grown, now)
 		else
 			data.Plants[key] = nil
 		end
@@ -5683,9 +8902,9 @@ function PlotService.Plant(player, index)
 		data.Seeds[seedId] = nil
 	end
 	local now = Util.Now()
-	local plantedAt = math.floor(now)
-	data.Plants[tostring(index)] = { Seed = seedId, PlantedAt = plantedAt }
-	local state = createPlant(plot, index, seedId, plantedAt, now)
+	local saved = { Seed = seedId, Grown = 0, SavedAt = math.floor(now) }
+	data.Plants[tostring(index)] = saved
+	local state = createPlant(plot, index, saved, 0, now)
 
 	DataService.EnsureSelection(player)
 	PlotService.UpdatePlantPrompts(player)
@@ -5751,8 +8970,9 @@ end
 
 function PlotService.Tick(now)
 	for player, plot in pairs(playerPlots) do
+		local speed = growthSpeed(player)
 		for _, state in pairs(plot.Plants) do
-			if updateGrowth(state, now) then
+			if updateGrowth(state, now, speed) then
 				BirdService.ScheduleFirst(state, now)
 				Net.Notify:FireClient(
 					player,
@@ -5777,7 +8997,7 @@ return PlotService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="82">
+      <Item class="ModuleScript" referent="90">
         <Properties>
           <string name="Name">ShopService</string>
           <string name="Source"><![CDATA[-- The seed shop. Stock is rerolled every few minutes; rarer seeds show up
@@ -5899,7 +9119,390 @@ return ShopService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="83">
+      <Item class="ModuleScript" referent="91">
+        <Properties>
+          <string name="Name">TradeService</string>
+          <string name="Source"><![CDATA[-- Player-to-player trading of birds and coins.
+--
+-- 1. A player sends a request; the other player accepts or declines.
+-- 2. Both add birds and coins to their side. Any change un-readies both.
+-- 3. When both are ready a short countdown starts, then the server checks
+--    everything again and swaps the birds and coins in one go.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = require(Shared.Config)
+local Net = require(Shared.Net)
+local Pets = require(Shared.Pets)
+local Util = require(Shared.Util)
+
+local DataService = require(script.Parent.DataService)
+local PetService = require(script.Parent.PetService)
+
+local TradeService = {}
+
+local sessions = {} -- [Player] = session (both players point at the same session)
+local requests = {} -- [target Player] = { [from Player] = expiresAt }
+local lastRequest = {} -- [Player] = time of their last request
+
+local function partnerOf(session, player)
+	return session.Players[1] == player and session.Players[2] or session.Players[1]
+end
+
+local function stateFor(session, player)
+	local other = partnerOf(session, player)
+	local mine, theirs = session.Offers[player], session.Offers[other]
+	local theirData = DataService.Get(other)
+	local theirPets = {}
+	for _, id in ipairs(theirs.Pets) do
+		local pet = theirData and theirData.Pets[id]
+		if pet then
+			table.insert(theirPets, PetService.Summary(pet, id))
+		end
+	end
+	return {
+		Active = true,
+		PartnerName = other.DisplayName,
+		PartnerUserId = other.UserId,
+		MyPets = table.clone(mine.Pets),
+		MyCoins = mine.Coins,
+		TheirPets = theirPets,
+		TheirCoins = theirs.Coins,
+		MyReady = session.Ready[player] == true,
+		TheirReady = session.Ready[other] == true,
+		ExecuteAt = session.ExecuteAt,
+		ServerNow = Util.Now(),
+	}
+end
+
+local function sendState(session)
+	for _, player in ipairs(session.Players) do
+		if player.Parent == Players then
+			Net.TradeState:FireClient(player, stateFor(session, player))
+		end
+	end
+end
+
+local function endSession(session, reason, completed)
+	for _, player in ipairs(session.Players) do
+		if sessions[player] == session then
+			sessions[player] = nil
+		end
+		if player.Parent == Players then
+			Net.TradeState:FireClient(player, { Active = false, Reason = reason, Completed = completed == true })
+		end
+	end
+end
+
+local function unready(session)
+	session.Ready = {}
+	session.ExecuteAt = nil
+end
+
+local function isEmpty(session)
+	for _, offer in pairs(session.Offers) do
+		if #offer.Pets > 0 or offer.Coins > 0 then
+			return false
+		end
+	end
+	return true
+end
+
+------------------------------------------------------------------------------
+-- Requests
+
+function TradeService.Request(player, targetUserId)
+	if type(targetUserId) ~= "number" then
+		return
+	end
+	local target = Players:GetPlayerByUserId(targetUserId)
+	local now = Util.Now()
+	if not target or target == player then
+		return
+	end
+	if not DataService.Get(player) or not DataService.Get(target) then
+		Net.Notify:FireClient(player, "That player is still loading.", "Error")
+		return
+	end
+	if sessions[player] then
+		Net.Notify:FireClient(player, "Finish your current trade first.", "Error")
+		return
+	end
+	if sessions[target] then
+		Net.Notify:FireClient(player, target.DisplayName .. " is already trading.", "Error")
+		return
+	end
+	if lastRequest[player] and now - lastRequest[player] < Config.TradeRequestCooldown then
+		Net.Notify:FireClient(player, "Slow down! Wait a moment before sending another request.", "Error")
+		return
+	end
+	lastRequest[player] = now
+	requests[target] = requests[target] or {}
+	requests[target][player] = now + Config.TradeRequestTimeout
+	Net.TradeIncoming:FireClient(target, {
+		FromUserId = player.UserId,
+		FromName = player.DisplayName,
+		ExpiresAt = now + Config.TradeRequestTimeout,
+		ServerNow = now,
+	})
+	Net.Notify:FireClient(player, "🤝 Trade request sent to " .. target.DisplayName .. ".", "Info")
+end
+
+function TradeService.Respond(player, fromUserId, accept)
+	if type(fromUserId) ~= "number" then
+		return
+	end
+	local from = Players:GetPlayerByUserId(fromUserId)
+	local pending = from and requests[player] and requests[player][from]
+	if not pending or Util.Now() > pending then
+		if requests[player] and from then
+			requests[player][from] = nil
+		end
+		Net.Notify:FireClient(player, "That trade request has expired.", "Error")
+		return
+	end
+	requests[player][from] = nil
+	if accept ~= true then
+		Net.Notify:FireClient(from, player.DisplayName .. " declined your trade request.", "Info")
+		return
+	end
+	if sessions[player] or sessions[from] then
+		Net.Notify:FireClient(player, "One of you is already trading.", "Error")
+		return
+	end
+	if not DataService.Get(player) or not DataService.Get(from) then
+		return
+	end
+	local session = {
+		Players = { from, player },
+		Offers = {
+			[from] = { Pets = {}, Coins = 0 },
+			[player] = { Pets = {}, Coins = 0 },
+		},
+		Ready = {},
+	}
+	sessions[from] = session
+	sessions[player] = session
+	sendState(session)
+end
+
+------------------------------------------------------------------------------
+-- Changing offers
+
+function TradeService.Update(player, action, value)
+	local session = sessions[player]
+	local data = DataService.Get(player)
+	if not session or not data then
+		return
+	end
+	local offer = session.Offers[player]
+
+	if action == "AddPet" then
+		local pet = type(value) == "string" and data.Pets[value]
+		if not pet or table.find(offer.Pets, value) then
+			return
+		end
+		if #offer.Pets >= Config.TradeMaxPets then
+			Net.Notify:FireClient(player, "You can offer up to " .. Config.TradeMaxPets .. " birds.", "Error")
+			return
+		elseif pet.Favorite then
+			Net.Notify:FireClient(player, pet.Name .. " is a favorite. Unfavorite it to trade it.", "Error")
+			return
+		elseif pet.Nest then
+			Net.Notify:FireClient(player, pet.Name .. " is busy sitting on an egg.", "Error")
+			return
+		end
+		table.insert(offer.Pets, value)
+		unready(session)
+	elseif action == "RemovePet" then
+		local index = type(value) == "string" and table.find(offer.Pets, value)
+		if not index then
+			return
+		end
+		table.remove(offer.Pets, index)
+		unready(session)
+	elseif action == "SetCoins" then
+		local coins = tonumber(value)
+		if not coins or coins ~= coins or coins == math.huge then
+			return
+		end
+		coins = math.clamp(math.floor(coins), 0, data.Coins)
+		if coins == offer.Coins then
+			sendState(session)
+			return
+		end
+		offer.Coins = coins
+		unready(session)
+	elseif action == "Ready" then
+		if isEmpty(session) then
+			Net.Notify:FireClient(player, "Add a bird or some coins to the trade first.", "Error")
+			return
+		end
+		session.Ready[player] = true
+		local other = partnerOf(session, player)
+		if session.Ready[other] then
+			session.ExecuteAt = Util.Now() + Config.TradeCountdown
+		end
+	elseif action == "Unready" then
+		session.Ready[player] = nil
+		session.ExecuteAt = nil
+	elseif action == "Cancel" then
+		endSession(session, player.DisplayName .. " cancelled the trade.")
+		return
+	else
+		return
+	end
+	sendState(session)
+end
+
+------------------------------------------------------------------------------
+-- Doing the trade
+
+local function problemWith(player, data, offer)
+	if not data or player.Parent ~= Players then
+		return player.DisplayName .. " left."
+	end
+	for _, id in ipairs(offer.Pets) do
+		local pet = data.Pets[id]
+		if not pet then
+			return player.DisplayName .. " no longer has one of those birds."
+		elseif pet.Nest then
+			return Pets.DisplayName(pet) .. " is sitting on an egg."
+		end
+	end
+	if offer.Coins > data.Coins then
+		return player.DisplayName .. " doesn't have that many coins any more."
+	end
+	return nil
+end
+
+local function execute(session)
+	local a, b = session.Players[1], session.Players[2]
+	local dataA, dataB = DataService.Get(a), DataService.Get(b)
+	local offerA, offerB = session.Offers[a], session.Offers[b]
+
+	local problem = problemWith(a, dataA, offerA) or problemWith(b, dataB, offerB)
+	if not problem then
+		if Pets.CountPets(dataA.Pets) - #offerA.Pets + #offerB.Pets > Config.MaxPets then
+			problem = a.DisplayName .. "'s aviary doesn't have room."
+		elseif Pets.CountPets(dataB.Pets) - #offerB.Pets + #offerA.Pets > Config.MaxPets then
+			problem = b.DisplayName .. "'s aviary doesn't have room."
+		end
+	end
+	if problem then
+		unready(session)
+		for _, player in ipairs(session.Players) do
+			if player.Parent == Players then
+				Net.Notify:FireClient(player, "Trade stopped: " .. problem, "Error")
+			end
+		end
+		if dataA and dataB and a.Parent == Players and b.Parent == Players then
+			sendState(session)
+		else
+			endSession(session, "Trade cancelled.")
+		end
+		return
+	end
+
+	-- take everything out first, then hand it over
+	local fromA, fromB = {}, {}
+	for _, id in ipairs(offerA.Pets) do
+		table.insert(fromA, dataA.Pets[id])
+		dataA.Pets[id] = nil
+	end
+	for _, id in ipairs(offerB.Pets) do
+		table.insert(fromB, dataB.Pets[id])
+		dataB.Pets[id] = nil
+	end
+	local function receive(data, pets)
+		for _, pet in ipairs(pets) do
+			pet.Equipped = false
+			pet.Favorite = false
+			pet.Nest = nil
+			pet.ParentIds = nil -- those ids belonged to the old owner
+			PetService.AddPet(data, pet)
+		end
+	end
+	receive(dataB, fromA)
+	receive(dataA, fromB)
+	dataA.Coins += offerB.Coins - offerA.Coins
+	dataB.Coins += offerA.Coins - offerB.Coins
+
+	endSession(session, "Trade complete!", true)
+	for _, player in ipairs(session.Players) do
+		PetService.Refresh(player)
+		Net.Notify:FireClient(player, "🤝 Trade complete! Check your aviary.", "Success")
+		-- save straight away so a crash can't undo half a trade
+		task.spawn(DataService.Save, player)
+	end
+end
+
+------------------------------------------------------------------------------
+-- Hooks
+
+function TradeService.IsOffered(player, petId)
+	local session = sessions[player]
+	return session ~= nil and table.find(session.Offers[player].Pets, petId) ~= nil
+end
+
+-- Called when a player's pets change: drops birds that can't be traded any more.
+function TradeService.Revalidate(player)
+	local session = sessions[player]
+	if not session then
+		return
+	end
+	local data = DataService.Get(player)
+	local offer = session.Offers[player]
+	local changed = false
+	for i = #offer.Pets, 1, -1 do
+		local pet = data and data.Pets[offer.Pets[i]]
+		if not pet or pet.Nest or pet.Favorite then
+			table.remove(offer.Pets, i)
+			changed = true
+		end
+	end
+	if data and offer.Coins > data.Coins then
+		offer.Coins = data.Coins
+		changed = true
+	end
+	if changed then
+		unready(session)
+	end
+	sendState(session)
+end
+
+function TradeService.PlayerLeft(player)
+	local session = sessions[player]
+	if session then
+		endSession(session, player.DisplayName .. " left the game.")
+	end
+	requests[player] = nil
+	lastRequest[player] = nil
+	for _, pending in pairs(requests) do
+		pending[player] = nil
+	end
+end
+
+function TradeService.Tick(now)
+	local done = {}
+	for _, session in pairs(sessions) do
+		if not done[session] then
+			done[session] = true
+			if session.ExecuteAt and now >= session.ExecuteAt then
+				session.ExecuteAt = nil
+				execute(session)
+			end
+		end
+	end
+end
+
+return TradeService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="92">
         <Properties>
           <string name="Name">WorldBuilder</string>
           <string name="Source"><![CDATA[-- Builds the map at runtime: garden plots, paths, the seed shop and decorations.
@@ -6010,6 +9613,70 @@ local function decorate(model)
 	end
 end
 
+-- A twiggy nest. Pets sit around it while they keep their egg warm.
+local function buildNest(parent, index, cf)
+	local model = Instance.new("Model")
+	model.Name = "Nest" .. index
+	local twig = Color3.fromRGB(125, 90, 55)
+	local base = newPart(
+		model,
+		"NestBase",
+		Vector3.new(0.5, 4.4, 4.4),
+		cf * CFrame.new(0, 0.25, 0) * CFrame.Angles(0, 0, math.rad(90)),
+		Color3.fromRGB(105, 75, 45),
+		Enum.Material.Wood,
+		{ Shape = Enum.PartType.Cylinder, CanCollide = false }
+	)
+	base:SetAttribute("NestIndex", index)
+	newPart(
+		model,
+		"Straw",
+		Vector3.new(0.2, 3.2, 3.2),
+		cf * CFrame.new(0, 0.55, 0) * CFrame.Angles(0, 0, math.rad(90)),
+		Color3.fromRGB(215, 185, 115),
+		Enum.Material.Grass,
+		{ Shape = Enum.PartType.Cylinder, CanCollide = false, CanQuery = false }
+	)
+	for i = 1, 10 do
+		local angle = i / 10 * math.pi * 2
+		local stick = newPart(
+			model,
+			"Twigs",
+			Vector3.new(1.7, 0.65, 0.65),
+			cf
+				* CFrame.new(math.cos(angle) * 1.85, 0.75, math.sin(angle) * 1.85)
+				* CFrame.Angles(0, -angle + math.pi / 2, 0),
+			twig,
+			Enum.Material.Wood,
+			{ CanCollide = false, CanQuery = false }
+		)
+		local mesh = Instance.new("SpecialMesh")
+		mesh.MeshType = Enum.MeshType.Sphere
+		mesh.Parent = stick
+	end
+
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "NestStatus"
+	gui.Size = UDim2.fromOffset(170, 40)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, 4.2, 0)
+	gui.MaxDistance = 40
+	gui.LightInfluence = 0
+	local label = Instance.new("TextLabel")
+	label.Name = "Status"
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.FredokaOne
+	label.Text = "🪺 Empty nest"
+	label.TextColor3 = Color3.new(1, 1, 1)
+	label.TextStrokeTransparency = 0.3
+	label.TextScaled = true
+	label.Parent = gui
+	gui.Parent = base
+
+	model.Parent = parent
+	return { Model = model, Base = base, CFrame = cf }
+end
+
 ------------------------------------------------------------------------------
 
 local function buildPlot(parent, id, cf)
@@ -6082,6 +9749,14 @@ local function buildPlot(parent, id, cf)
 	local signLabel = newSignText(board, Enum.NormalId.Back, "Empty Garden")
 	newSignText(board, Enum.NormalId.Front, "🐦 Bird Garden 🐦")
 
+	-- nests for breeding, in the front corners
+	local nests = {}
+	for index = 1, Config.NestCount do
+		local side = index % 2 == 1 and -1 or 1
+		local row = math.floor((index - 1) / 2)
+		nests[index] = buildNest(model, index, cf * CFrame.new(side * 14, 0.4, z - 4.5 - row * 5))
+	end
+
 	model.Parent = parent
 
 	return {
@@ -6090,6 +9765,7 @@ local function buildPlot(parent, id, cf)
 		CFrame = cf,
 		Tiles = tiles,
 		SignLabel = signLabel,
+		Nests = nests,
 		SpawnCFrame = cf * CFrame.new(0, 3.5, z - 4),
 		FrontPoint = (cf * CFrame.new(0, 0, z)).Position,
 	}
@@ -6467,7 +10143,7 @@ return WorldBuilder
       </Item>
     </Item>
   </Item>
-  <Item class="ServerStorage" referent="84">
+  <Item class="ServerStorage" referent="93">
     <Properties>
       <string name="Name">ServerStorage</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6479,7 +10155,7 @@ return WorldBuilder
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003cf</UniqueId>
     </Properties>
   </Item>
-  <Item class="HttpService" referent="85">
+  <Item class="HttpService" referent="94">
     <Properties>
       <string name="Name">HttpService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6492,7 +10168,7 @@ return WorldBuilder
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003d4</UniqueId>
     </Properties>
   </Item>
-  <Item class="DataStoreService" referent="86">
+  <Item class="DataStoreService" referent="95">
     <Properties>
       <string name="Name">DataStoreService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6506,7 +10182,7 @@ return WorldBuilder
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003d8</UniqueId>
     </Properties>
   </Item>
-  <Item class="Lighting" referent="87">
+  <Item class="Lighting" referent="96">
     <Properties>
       <string name="Name">Lighting</string>
       <Color3 name="Ambient">
@@ -6557,7 +10233,7 @@ return WorldBuilder
       <string name="TimeOfDay">14:30:00</string>
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003d9</UniqueId>
     </Properties>
-    <Item class="Sky" referent="88">
+    <Item class="Sky" referent="97">
       <Properties>
         <string name="Name">Sky</string>
         <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6602,7 +10278,7 @@ return WorldBuilder
         <UniqueId name="UniqueId">184acf13447c97560ad43f37000003eb</UniqueId>
       </Properties>
     </Item>
-    <Item class="SunRaysEffect" referent="89">
+    <Item class="SunRaysEffect" referent="98">
       <Properties>
         <string name="Name">SunRays</string>
         <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6617,7 +10293,7 @@ return WorldBuilder
         <UniqueId name="UniqueId">184acf13447c97560ad43f37000003ec</UniqueId>
       </Properties>
     </Item>
-    <Item class="Atmosphere" referent="90">
+    <Item class="Atmosphere" referent="99">
       <Properties>
         <string name="Name">Atmosphere</string>
         <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6643,7 +10319,7 @@ return WorldBuilder
         <UniqueId name="UniqueId">184acf13447c97560ad43f37000003ed</UniqueId>
       </Properties>
     </Item>
-    <Item class="BloomEffect" referent="91">
+    <Item class="BloomEffect" referent="100">
       <Properties>
         <string name="Name">Bloom</string>
         <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6659,7 +10335,7 @@ return WorldBuilder
         <UniqueId name="UniqueId">184acf13447c97560ad43f37000003ee</UniqueId>
       </Properties>
     </Item>
-    <Item class="DepthOfFieldEffect" referent="92">
+    <Item class="DepthOfFieldEffect" referent="101">
       <Properties>
         <string name="Name">DepthOfField</string>
         <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6677,7 +10353,7 @@ return WorldBuilder
       </Properties>
     </Item>
   </Item>
-  <Item class="LodDataService" referent="93">
+  <Item class="LodDataService" referent="102">
     <Properties>
       <string name="Name">Instance</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6689,7 +10365,7 @@ return WorldBuilder
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003da</UniqueId>
     </Properties>
   </Item>
-  <Item class="ProximityPromptService" referent="94">
+  <Item class="ProximityPromptService" referent="103">
     <Properties>
       <string name="Name">ProximityPromptService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6704,7 +10380,7 @@ return WorldBuilder
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003db</UniqueId>
     </Properties>
   </Item>
-  <Item class="Teams" referent="95">
+  <Item class="Teams" referent="104">
     <Properties>
       <string name="Name">Teams</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6716,7 +10392,7 @@ return WorldBuilder
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003dc</UniqueId>
     </Properties>
   </Item>
-  <Item class="TestService" referent="96">
+  <Item class="TestService" referent="105">
     <Properties>
       <string name="Name">TestService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6737,7 +10413,7 @@ return WorldBuilder
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003dd</UniqueId>
     </Properties>
   </Item>
-  <Item class="UGCAvatarService" referent="97">
+  <Item class="UGCAvatarService" referent="106">
     <Properties>
       <string name="Name">UGCAvatarService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6749,7 +10425,7 @@ return WorldBuilder
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003de</UniqueId>
     </Properties>
   </Item>
-  <Item class="VirtualInputManager" referent="98">
+  <Item class="VirtualInputManager" referent="107">
     <Properties>
       <string name="Name">VirtualInputManager</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6761,7 +10437,7 @@ return WorldBuilder
       <UniqueId name="UniqueId">184acf13447c97560ad43f37000003df</UniqueId>
     </Properties>
   </Item>
-  <Item class="VoiceChatService" referent="99">
+  <Item class="VoiceChatService" referent="108">
     <Properties>
       <string name="Name">VoiceChatService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6777,7 +10453,7 @@ return WorldBuilder
       <token name="UseAudioApi">2</token>
     </Properties>
   </Item>
-  <Item class="VideoService" referent="100">
+  <Item class="VideoService" referent="109">
     <Properties>
       <string name="Name">VideoService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>
@@ -6789,7 +10465,7 @@ return WorldBuilder
       <UniqueId name="UniqueId">184acf13447c97560ad43f370000040b</UniqueId>
     </Properties>
   </Item>
-  <Item class="SerializationService" referent="101">
+  <Item class="SerializationService" referent="110">
     <Properties>
       <string name="Name">SerializationService</string>
       <BinaryString name="AttributesSerialize"></BinaryString>

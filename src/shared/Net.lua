@@ -15,11 +15,19 @@ local DEFINITIONS = {
 		"OpenShop", -- server -> client: open the shop window
 		"SelectSeed", -- client -> server: choose which seed to plant
 		"Teleport", -- client -> server: "Garden" or "Shop"
+		"PetEvent", -- server -> client: something happened to a pet (floating text over it)
+		"OpenNest", -- server -> client: open the nest window
+		"TradeRequest", -- client -> server: ask another player to trade
+		"TradeRespond", -- client -> server: accept or decline a trade request
+		"TradeUpdate", -- client -> server: change your offer, ready up or cancel
+		"TradeIncoming", -- server -> client: someone wants to trade with you
+		"TradeState", -- server -> client: the current trade
 	},
 	RemoteFunction = {
 		"GetState", -- client -> server: initial state snapshot
 		"GetShop", -- client -> server: initial shop snapshot
 		"BuySeed", -- client -> server: buy one seed, returns ok, message
+		"PetAction", -- client -> server: equip, sell, breed... returns ok, message
 	},
 }
 

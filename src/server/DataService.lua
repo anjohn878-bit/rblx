@@ -7,7 +7,9 @@ local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Config = require(Shared.Config)
+local Birds = require(Shared.Birds)
 local Net = require(Shared.Net)
+local Pets = require(Shared.Pets)
 local Seeds = require(Shared.Seeds)
 local Util = require(Shared.Util)
 
@@ -31,10 +33,14 @@ local function defaultData()
 	return {
 		Coins = Config.StartingCoins,
 		Seeds = Util.DeepCopy(Config.StartingSeeds),
-		Plants = {}, -- ["tileIndex"] = { Seed = id, PlantedAt = unixSeconds }
+		Plants = {}, -- ["tileIndex"] = { Seed = id, Grown = seconds of growth, SavedAt = unixSeconds }
 		Journal = {}, -- [birdId] = times befriended
 		ShinyJournal = {}, -- [birdId] = shiny times befriended
 		TotalBefriended = 0,
+		Pets = {}, -- [petId] = pet table, see Pets.lua
+		NextPetId = 1,
+		Nests = {}, -- ["nestIndex"] = { Species, ParentA, ParentB, StartedAt, HatchAt, Restore }
+		TotalHatched = 0,
 	}
 end
 
@@ -54,6 +60,28 @@ local function reconcile(data)
 	for tile, plant in pairs(data.Plants) do
 		if type(plant) ~= "table" or not Seeds.Get(plant.Seed) then
 			data.Plants[tile] = nil
+		end
+	end
+	for id, pet in pairs(data.Pets) do
+		if type(pet) ~= "table" or not Birds.Get(pet.Species) then
+			data.Pets[id] = nil
+		else
+			pet.Stars = math.clamp(math.floor(tonumber(pet.Stars) or 1), 1, Pets.MaxStars)
+			pet.Name = type(pet.Name) == "string" and pet.Name or Pets.FirstNames[1]
+		end
+	end
+	-- a nest is only valid while both parents are still sitting on it
+	for key, nest in pairs(data.Nests) do
+		local index = tonumber(key)
+		local a = type(nest) == "table" and data.Pets[nest.ParentA]
+		local b = type(nest) == "table" and data.Pets[nest.ParentB]
+		if not (index and a and b and a.Nest == index and b.Nest == index) then
+			data.Nests[key] = nil
+		end
+	end
+	for _, pet in pairs(data.Pets) do
+		if pet.Nest and not data.Nests[tostring(pet.Nest)] then
+			pet.Nest = nil
 		end
 	end
 	return data
@@ -188,6 +216,7 @@ function DataService.Snapshot(player)
 		return nil
 	end
 	local data = profile.Data
+	local now = Util.Now()
 	return {
 		Coins = data.Coins,
 		Seeds = data.Seeds,
@@ -195,7 +224,10 @@ function DataService.Snapshot(player)
 		ShinyJournal = data.ShinyJournal,
 		TotalBefriended = data.TotalBefriended,
 		SelectedSeed = profile.SelectedSeed,
-		ServerNow = Util.Now(),
+		Pets = data.Pets,
+		Nests = data.Nests,
+		Perks = Pets.ComputePerks(data.Pets, now),
+		ServerNow = now,
 	}
 end
 

@@ -1,5 +1,6 @@
--- Spawns birds on blooming plants, flies them in, lets the owner befriend
--- them for coins, and flies them away again.
+-- Spawns birds on blooming plants and flies them in. When the owner
+-- befriends one it joins their aviary as a pet (see PetService); birds
+-- nobody befriends fly away again.
 
 local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -10,10 +11,11 @@ local BirdBuilder = require(Shared.BirdBuilder)
 local Birds = require(Shared.Birds)
 local Config = require(Shared.Config)
 local Net = require(Shared.Net)
+local Pets = require(Shared.Pets)
 local Rarities = require(Shared.Rarities)
 local Util = require(Shared.Util)
 
-local DataService = require(script.Parent.DataService)
+local PetService = require(script.Parent.PetService)
 
 local BirdService = {}
 
@@ -110,8 +112,9 @@ local function befriend(bird, player)
 	if bird.Leaving or not bird.Landed then
 		return
 	end
-	local data = DataService.Get(player)
-	if not data then
+	local def = bird.Def
+	local pet, petId, coins, firstTime = PetService.Befriend(player, def, bird.Shiny)
+	if not pet then
 		return
 	end
 	bird.Leaving = true
@@ -120,48 +123,63 @@ local function befriend(bird, player)
 		bird.Prompt = nil
 	end
 
-	local def = bird.Def
-	local reward = def.Reward * (bird.Shiny and Config.ShinyMultiplier or 1)
-	local firstTime = (data.Journal[def.Id] or 0) == 0
-	if firstTime then
-		reward *= Config.DiscoveryBonusMultiplier
-	end
-	data.Coins += reward
-	data.Journal[def.Id] = (data.Journal[def.Id] or 0) + 1
-	if bird.Shiny then
-		data.ShinyJournal[def.Id] = (data.ShinyJournal[def.Id] or 0) + 1
-	end
-	data.TotalBefriended += 1
-	DataService.Push(player)
-
-	local body = bird.Model.PrimaryPart
+	local model = bird.Model
+	local body = model.PrimaryPart
 	local position = body.CFrame.Position
-	Net.Effect:FireClient(
-		player,
-		position + Vector3.new(0, 2, 0),
-		"+" .. Util.FormatNumber(reward) .. " 🪙",
-		Color3.fromRGB(255, 220, 80)
-	)
 	Net.Effect:FireClient(player, position + Vector3.new(0, 1, 0), "❤", Color3.fromRGB(255, 110, 150))
-	if firstTime then
-		Net.Notify:FireClient(player, "📖 New bird discovered: " .. def.Name .. "! Discovery bonus!", "Rare")
-	end
-	if bird.Shiny then
-		Net.Notify:FireClient(
+	if coins > 0 then
+		Net.Effect:FireClient(
 			player,
-			"✨ You befriended a SHINY " .. def.Name .. "! x" .. Config.ShinyMultiplier .. " coins!",
-			"Rare"
+			position + Vector3.new(0, 2.5, 0),
+			"+" .. Util.FormatNumber(coins) .. " 🪙",
+			Color3.fromRGB(255, 220, 80)
 		)
 	end
 
-	-- a happy little hop, then off it goes
-	local hop = TweenService:Create(
-		body,
-		TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, true),
-		{ CFrame = body.CFrame + Vector3.new(0, 1.2, 0) }
-	)
-	hop:Play()
-	task.delay(0.45, flyAway, bird)
+	local title = (bird.Shiny and "✨ Shiny " or "") .. def.Name
+	if firstTime then
+		Net.Notify:FireClient(player, "📖 New bird discovered: " .. def.Name .. "! Discovery bonus coins!", "Rare")
+	end
+	if petId then
+		Net.Effect:FireClient(
+			player,
+			position + Vector3.new(0, 2, 0),
+			pet.Name .. " " .. Pets.StarText(pet.Stars),
+			bird.Shiny and Color3.fromRGB(255, 230, 120) or Rarities.Color(def.Rarity)
+		)
+		if bird.Shiny or Rarities.Rank(def.Rarity) >= Rarities.Rank("Rare") or pet.Stars >= 3 then
+			Net.Notify:FireClient(
+				player,
+				"🐦 " .. pet.Name .. " the " .. title .. " " .. Pets.StarText(pet.Stars) .. " joined your aviary!",
+				"Rare"
+			)
+		end
+		if pet.Equipped then
+			-- it stays as a pet: the client draws it hopping down from this spot
+			local marker = PetService.FindMarker(player, petId)
+			if marker then
+				marker:SetAttribute("SpawnAt", position)
+			end
+			bird.Gone = true
+			local state = bird.State
+			if state.Bird == bird then
+				state.Bird = nil
+				setHasBird(state, false)
+				BirdService.ScheduleNext(state, Util.Now())
+			end
+			model:Destroy()
+		else
+			-- no room to roam: it flies off to the aviary
+			task.delay(0.3, flyAway, bird)
+		end
+	else
+		Net.Notify:FireClient(
+			player,
+			"Your aviary is full, so " .. title .. " was sold for " .. Util.FormatNumber(coins) .. " coins.",
+			"Info"
+		)
+		task.delay(0.3, flyAway, bird)
+	end
 end
 
 local function land(bird)
@@ -198,9 +216,15 @@ local function spawnBird(state)
 		return
 	end
 
-	local entry = Util.WeightedPick(state.Seed.Birds, rng)
-	local def = Birds.Get(entry.Id)
-	local shiny = rng:NextNumber() < Config.ShinyChance
+	-- the Lucky perk tilts the odds toward rarer and shiny birds
+	local luck = PetService.GetPerks(state.Owner).Luck
+	local weights = {}
+	for _, entry in ipairs(state.Seed.Birds) do
+		local rank = Rarities.Rank(Birds.Get(entry.Id).Rarity)
+		table.insert(weights, { Id = entry.Id, Weight = entry.Weight * (1 + luck * (rank - 1)) })
+	end
+	local def = Birds.Get(Util.WeightedPick(weights, rng).Id)
+	local shiny = rng:NextNumber() < Config.ShinyChance * (1 + luck)
 	local model = BirdBuilder.Build(def, { Shiny = shiny })
 	model.Name = def.Id
 	model.ModelStreamingMode = Enum.ModelStreamingMode.Atomic
@@ -272,7 +296,8 @@ end
 
 function BirdService.ScheduleNext(state, now)
 	local range = state.Seed.BirdInterval
-	state.NextBirdAt = now + rng:NextNumber(range[1], range[2])
+	local attraction = PetService.GetPerks(state.Owner).Attraction
+	state.NextBirdAt = now + rng:NextNumber(range[1], range[2]) / (1 + attraction)
 end
 
 -- Called every tick for each blooming plant.
