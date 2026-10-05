@@ -1,0 +1,4 @@
+# Tools used to build and check the game. Install with `rokit install`.
+[tools]
+lune = "lune-org/lune@0.10.5"
+stylua = "JohnnyMorganz/StyLua@2.5.2"
