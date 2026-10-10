@@ -1,0 +1,8 @@
+# Same line endings on every OS (Windows Git would otherwise convert to CRLF and StyLua fails every file)
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.rbxl binary
+*.rbxlx binary
+*.png binary
+*.glb binary
+*.fbx binary

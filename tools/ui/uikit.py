@@ -402,7 +402,7 @@ def cmd_build(spec, theme, gen_dir):
     gen.mkdir(parents=True, exist_ok=True)
     for screen in spec["screens"]:
         p = gen / f"{screen['name']}.luau"
-        p.write_text(build_luau(spec, screen, theme))
+        p.write_text(build_luau(spec, screen, theme), newline="\n")
         subprocess.run(["stylua", str(p)], check=False)
         print(p)
 

@@ -49,3 +49,4 @@ game as possible must be checkable while it sits still.**
 - With `ZIndexBehavior.Sibling`, children ALWAYS draw over their parent — shadows/backgrounds must be sibling layers (see `src/client/UI/Depth.luau`).
 - Don't fire remotes every frame; batch state into one `StateChanged` event.
 - `PlayerAdded` can fire before your connection on a fast join in Studio — also loop `Players:GetPlayers()` when the script starts if it matters.
+- Windows Git converts LF→CRLF on checkout and StyLua then fails every file: `.gitattributes` pins `eol=lf`. Write generated files with `newline="\n"`.
