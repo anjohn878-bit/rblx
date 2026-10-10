@@ -1,0 +1,365 @@
+{
+  "theme": {},
+  "screens": [
+    {
+      "name": "HUD",
+      "children": [
+        {
+          "name": "Coins",
+          "type": "Panel",
+          "color": "panel",
+          "size": [
+            0,
+            260,
+            0,
+            72
+          ],
+          "pos": [
+            0,
+            24,
+            0,
+            24
+          ],
+          "padding": 10,
+          "list": {
+            "dir": "x",
+            "gap": 10,
+            "align": "start"
+          },
+          "children": [
+            {
+              "name": "Icon",
+              "type": "Icon",
+              "icon": "coin",
+              "size": [
+                0,
+                52,
+                0,
+                52
+              ]
+            },
+            {
+              "name": "Amount",
+              "type": "Label",
+              "text": "12,450",
+              "textSize": 34,
+              "textAlign": "left",
+              "size": [
+                0,
+                170,
+                0,
+                52
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Upgrade",
+          "type": "Button",
+          "color": "success",
+          "text": "UPGRADE",
+          "textSize": 34,
+          "size": [
+            0,
+            260,
+            0,
+            84
+          ],
+          "pos": [
+            0.5,
+            0,
+            1,
+            -40
+          ],
+          "anchor": [
+            0.5,
+            1
+          ]
+        },
+        {
+          "name": "Shop",
+          "type": "Button",
+          "color": "accent",
+          "text": "SHOP",
+          "textSize": 30,
+          "size": [
+            0,
+            150,
+            0,
+            80
+          ],
+          "pos": [
+            0,
+            24,
+            0.5,
+            0
+          ],
+          "anchor": [
+            0,
+            0.5
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ShopMenu",
+      "children": [
+        {
+          "name": "Window",
+          "type": "Panel",
+          "size": [
+            0,
+            900,
+            0,
+            620
+          ],
+          "pos": [
+            0.5,
+            0,
+            0.5,
+            0
+          ],
+          "anchor": [
+            0.5,
+            0.5
+          ],
+          "centered": "xy",
+          "children": [
+            {
+              "name": "Title",
+              "type": "Label",
+              "text": "SHOP",
+              "textSize": 52,
+              "size": [
+                1,
+                -220,
+                0,
+                80
+              ],
+              "pos": [
+                0.5,
+                0,
+                0,
+                12
+              ],
+              "anchor": [
+                0.5,
+                0
+              ],
+              "centered": "x"
+            },
+            {
+              "name": "Close",
+              "type": "Button",
+              "color": "danger",
+              "text": "X",
+              "textSize": 36,
+              "size": [
+                0,
+                76,
+                0,
+                80
+              ],
+              "pos": [
+                1,
+                -16,
+                0,
+                16
+              ],
+              "anchor": [
+                1,
+                0
+              ]
+            },
+            {
+              "name": "Items",
+              "type": "Group",
+              "size": [
+                1,
+                -48,
+                0,
+                420
+              ],
+              "pos": [
+                0.5,
+                0,
+                0,
+                110
+              ],
+              "anchor": [
+                0.5,
+                0
+              ],
+              "centered": "x",
+              "list": {
+                "dir": "x",
+                "gap": 24
+              },
+              "children": [
+                {
+                  "name": "Item1",
+                  "type": "Panel",
+                  "size": [
+                    0,
+                    260,
+                    0,
+                    400
+                  ],
+                  "padding": 16,
+                  "list": {
+                    "dir": "y",
+                    "gap": 14
+                  },
+                  "children": [
+                    {
+                      "name": "Icon",
+                      "type": "Icon",
+                      "icon": "sword",
+                      "size": [
+                        0,
+                        160,
+                        0,
+                        160
+                      ]
+                    },
+                    {
+                      "name": "Name",
+                      "type": "Label",
+                      "text": "Blade",
+                      "textSize": 32,
+                      "size": [
+                        1,
+                        0,
+                        0,
+                        44
+                      ]
+                    },
+                    {
+                      "name": "Buy",
+                      "type": "Button",
+                      "color": "success",
+                      "text": "500",
+                      "textSize": 30,
+                      "size": [
+                        1,
+                        0,
+                        0,
+                        80
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "name": "Item2",
+                  "type": "Panel",
+                  "size": [
+                    0,
+                    260,
+                    0,
+                    400
+                  ],
+                  "padding": 16,
+                  "list": {
+                    "dir": "y",
+                    "gap": 14
+                  },
+                  "children": [
+                    {
+                      "name": "Icon",
+                      "type": "Icon",
+                      "icon": "shield",
+                      "size": [
+                        0,
+                        160,
+                        0,
+                        160
+                      ]
+                    },
+                    {
+                      "name": "Name",
+                      "type": "Label",
+                      "text": "Guard",
+                      "textSize": 32,
+                      "size": [
+                        1,
+                        0,
+                        0,
+                        44
+                      ]
+                    },
+                    {
+                      "name": "Buy",
+                      "type": "Button",
+                      "color": "success",
+                      "text": "750",
+                      "textSize": 30,
+                      "size": [
+                        1,
+                        0,
+                        0,
+                        80
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "name": "Item3",
+                  "type": "Panel",
+                  "size": [
+                    0,
+                    260,
+                    0,
+                    400
+                  ],
+                  "padding": 16,
+                  "list": {
+                    "dir": "y",
+                    "gap": 14
+                  },
+                  "children": [
+                    {
+                      "name": "Icon",
+                      "type": "Icon",
+                      "icon": "boots",
+                      "size": [
+                        0,
+                        160,
+                        0,
+                        160
+                      ]
+                    },
+                    {
+                      "name": "Name",
+                      "type": "Label",
+                      "text": "Dash",
+                      "textSize": 32,
+                      "size": [
+                        1,
+                        0,
+                        0,
+                        44
+                      ]
+                    },
+                    {
+                      "name": "Buy",
+                      "type": "Button",
+                      "color": "success",
+                      "text": "300",
+                      "textSize": 30,
+                      "size": [
+                        1,
+                        0,
+                        0,
+                        80
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

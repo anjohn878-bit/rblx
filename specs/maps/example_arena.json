@@ -1,0 +1,245 @@
+{
+ "parts": [
+  {
+   "name": "Ground",
+   "size": [
+    200,
+    2,
+    200
+   ],
+   "pos": [
+    0,
+    -1,
+    0
+   ],
+   "tags": [
+    "spawn",
+    "poi"
+   ]
+  },
+  {
+   "name": "Pillar0",
+   "size": [
+    8,
+    4,
+    8
+   ],
+   "pos": [
+    40.0,
+    2,
+    0.0
+   ],
+   "tags": [
+    "ring:pillars",
+    "poi"
+   ]
+  },
+  {
+   "name": "Pillar1",
+   "size": [
+    8,
+    4,
+    8
+   ],
+   "pos": [
+    20.0,
+    2,
+    34.641
+   ],
+   "tags": [
+    "ring:pillars",
+    "poi"
+   ]
+  },
+  {
+   "name": "Pillar2",
+   "size": [
+    8,
+    4,
+    8
+   ],
+   "pos": [
+    -20.0,
+    2,
+    34.641
+   ],
+   "tags": [
+    "ring:pillars",
+    "poi"
+   ]
+  },
+  {
+   "name": "Pillar3",
+   "size": [
+    8,
+    4,
+    8
+   ],
+   "pos": [
+    -40.0,
+    2,
+    0.0
+   ],
+   "tags": [
+    "ring:pillars",
+    "poi"
+   ]
+  },
+  {
+   "name": "Pillar4",
+   "size": [
+    8,
+    4,
+    8
+   ],
+   "pos": [
+    -20.0,
+    2,
+    -34.641
+   ],
+   "tags": [
+    "ring:pillars",
+    "poi"
+   ]
+  },
+  {
+   "name": "Pillar5",
+   "size": [
+    8,
+    4,
+    8
+   ],
+   "pos": [
+    20.0,
+    2,
+    -34.641
+   ],
+   "tags": [
+    "ring:pillars",
+    "poi"
+   ]
+  },
+  {
+   "name": "Step1",
+   "size": [
+    8,
+    5,
+    8
+   ],
+   "pos": [
+    0,
+    2.5,
+    -70
+   ]
+  },
+  {
+   "name": "Step2",
+   "size": [
+    8,
+    10,
+    8
+   ],
+   "pos": [
+    0,
+    5,
+    -82
+   ]
+  },
+  {
+   "name": "Tower",
+   "size": [
+    12,
+    15,
+    12
+   ],
+   "pos": [
+    0,
+    7.5,
+    -96
+   ],
+   "tags": [
+    "poi"
+   ]
+  },
+  {
+   "name": "Wall",
+   "size": [
+    4,
+    12,
+    40
+   ],
+   "pos": [
+    -70,
+    6,
+    0
+   ],
+   "tags": [
+    "decor"
+   ]
+  },
+  {
+   "name": "Wall2",
+   "size": [
+    40,
+    12,
+    4
+   ],
+   "pos": [
+    70,
+    6,
+    40
+   ],
+   "tags": [
+    "decor"
+   ]
+  },
+  {
+   "name": "CentreBlock",
+   "size": [
+    16,
+    14,
+    16
+   ],
+   "pos": [
+    0,
+    7,
+    0
+   ],
+   "tags": [
+    "decor"
+   ]
+  },
+  {
+   "name": "CoverNE",
+   "size": [
+    16,
+    10,
+    3
+   ],
+   "pos": [
+    22,
+    5,
+    -48
+   ],
+   "tags": [
+    "decor"
+   ]
+  },
+  {
+   "name": "CoverW",
+   "size": [
+    3,
+    10,
+    16
+   ],
+   "pos": [
+    -28,
+    5,
+    10
+   ],
+   "tags": [
+    "decor"
+   ]
+  }
+ ]
+}
