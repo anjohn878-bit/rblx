@@ -39,6 +39,7 @@ Mixed outline thicknesses are the #1 giveaway of beginner/AI UI — never overri
 - `centered` elements within 1.5 px.
 - Text ≥ 11 px after scaling and never taller than its box.
 - No Panel that exists only to draw a box around a single Button (AI habit).
+- Nothing over Roblox's own UI: menu buttons top-left (0,0,230,64 px, all devices), mobile thumbstick bottom-left and jump button bottom-right (phones/tablets). Previews draw these zones in red. Screens with `"modal": true` may cover the thumb zones (player isn't moving), never the menu.
 
 ## Icons — never emoji
 
@@ -62,3 +63,4 @@ template from those principles — never trace or copy another game's art, logos
 - A list that repositions a child must re-lay out that child's subtree (fixed in `layout_children`).
 - Pure scale-by-height makes phone buttons ~30 px; keep the 0.55 scale floor in BOTH `uikit.py` and `Depth.luau` (a test enforces they match).
 - Paths written into generated files use `/` (`as_posix`), otherwise Windows regenerates different files and the up-to-date test fails.
+- Found in Studio: a HUD element at (24,24) hid under the Roblox menu buttons. Reserved zones are absolute px (Roblox's UI doesn't use our scale).

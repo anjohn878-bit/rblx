@@ -27,7 +27,7 @@ return function(parent: Instance, viewportHeight: number): (ScreenGui, { [string
 	local n0 = Instance.new("Frame")
 	n0.Name = "Coins"
 	n0.Size = UDim2.new(0, 260 * S, 0, 72 * S)
-	n0.Position = UDim2.new(0, 24 * S, 0, 24 * S)
+	n0.Position = UDim2.new(0, 24 * S, 0, 120 * S)
 	n0.AnchorPoint = Vector2.new(0, 0)
 	n0.BorderSizePixel = 0
 	n0.BackgroundTransparency = 1
@@ -76,7 +76,7 @@ return function(parent: Instance, viewportHeight: number): (ScreenGui, { [string
 	local n4 = Instance.new("TextButton")
 	n4.Name = "Shop"
 	n4.Size = UDim2.new(0, 150 * S, 0, 80 * S)
-	n4.Position = UDim2.new(0, 24 * S, 0.5, 0 * S)
+	n4.Position = UDim2.new(0, 24 * S, 0.38, 0 * S)
 	n4.AnchorPoint = Vector2.new(0, 0.5)
 	n4.BorderSizePixel = 0
 	n4.BackgroundTransparency = 1

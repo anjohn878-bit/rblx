@@ -82,3 +82,18 @@ def test_generated_ui_is_up_to_date(tmp_path):
 def test_spec_label_uses_forward_slashes():
     # regression: Windows wrote specs\ui\hud.json into the generated header
     assert uikit.spec_label("specs\\ui\\hud.json") == "specs/ui/hud.json"
+
+
+def test_hud_under_roblox_menu_is_caught():
+    # regression (seen in Studio): coin box at (24,24) hid under the Roblox menu buttons
+    screen = {"name": "S", "children": [{"name": "Coins", "type": "Panel", "size": [0, 260, 0, 72], "pos": [0, 24, 0, 24]}]}
+    problems = uikit.check_screen(screen, uikit.DEFAULT_THEME, "desktop_hd", (1920, 1080))
+    assert any("Roblox menu" in p for p in problems)
+
+
+def test_modal_may_cover_thumb_controls_but_not_menu():
+    full = {"name": "Big", "type": "Panel", "size": [1, 0, 1, 0]}
+    modal = {"name": "M", "modal": True, "children": [full]}
+    problems = uikit.check_screen(modal, uikit.DEFAULT_THEME, "phone", (844, 390))
+    assert any("Roblox menu" in p for p in problems)
+    assert not any("thumbstick" in p or "jump" in p for p in problems)

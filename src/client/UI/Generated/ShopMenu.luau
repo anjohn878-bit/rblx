@@ -26,8 +26,8 @@ return function(parent: Instance, viewportHeight: number): (ScreenGui, { [string
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	local n0 = Instance.new("Frame")
 	n0.Name = "Window"
-	n0.Size = UDim2.new(0, 900 * S, 0, 620 * S)
-	n0.Position = UDim2.new(0.5, 0 * S, 0.5, 0 * S)
+	n0.Size = UDim2.new(0, 900 * S, 0, 560 * S)
+	n0.Position = UDim2.new(0.5, 0 * S, 0.5, 56 * S)
 	n0.AnchorPoint = Vector2.new(0.5, 0.5)
 	n0.BorderSizePixel = 0
 	n0.BackgroundTransparency = 1

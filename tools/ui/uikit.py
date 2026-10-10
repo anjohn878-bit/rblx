@@ -24,6 +24,23 @@ SCREENS = {
 # Global scale: offsets are authored at 1080p-tall and scaled by height, clamped.
 REF_HEIGHT, MIN_SCALE, MAX_SCALE = 1080, 0.55, 1.25
 MIN_TAP = 40  # px; Roblox's own touch controls are ~40-70
+TOUCH_SIZES = {"phone_small", "phone", "tablet"}
+
+
+def reserved_zones(size_name, size):
+    """Screen areas Roblox's own UI covers (absolute px, NOT scaled by our UI scale).
+    RULE (found in Studio): the HUD's coin box sat under the Roblox menu buttons."""
+    W, H = size
+    zones = [("Roblox menu buttons (top-left)", (0, 0, 230, 64))]
+    if size_name in TOUCH_SIZES:
+        small = min(W, H) < 500
+        if small:
+            zones += [("mobile jump button", (W - 105, H - 105, 105, 105)),
+                      ("mobile thumbstick", (0, H - 190, 230, 190))]
+        else:
+            zones += [("mobile jump button", (W - 185, H - 225, 185, 225)),
+                      ("mobile thumbstick", (0, H - 290, 330, 290))]
+    return zones
 MIN_TEXT = 11  # px after scaling
 CENTER_TOL = 1.5  # px
 
@@ -183,6 +200,15 @@ def check_screen(screen, theme, size_name, size):
             px, py, pw, ph = n.parent.rect
             if x < px - 0.5 or y < py - 0.5 or x + w > px + pw + 0.5 or y + h > py + ph + 0.5:
                 bad(n, "spills outside its parent")
+        # Roblox's own UI (menu buttons, mobile thumbstick/jump) must stay uncovered
+        # (modal screens may cover the thumb controls - the player isn't moving - never the menu)
+        if n.type != "Group" and not n.d.get("zoneOk"):
+            for label, zone in reserved_zones(size_name, size):
+                if screen.get("modal") and label.startswith("mobile"):
+                    continue
+                parent_hit = n.parent is not root and n.parent is not None and overlaps(n.parent.rect, zone)
+                if overlaps(n.rect, zone) and not parent_hit:
+                    bad(n, f"covered by / covers {label}")
         # RULE: no decorative frame drawn around a lone button (AI habit)
         if n.type == "Panel" and len(n.children) == 1 and n.children[0].type == "Button":
             cx, cy, cw, ch = n.children[0].rect
@@ -256,6 +282,14 @@ def render(screen, theme, size, out_path, icon_dir):
             d.text((ax, y + h / 2), n.d["text"], font=f, anchor=anchor, fill=hex_rgb(theme["text"]) + (255,),
                    stroke_width=max(1, round(2 * s)), stroke_fill=hex_rgb(theme["textStroke"]) + (255,))
         img.alpha_composite(layer)
+    # show Roblox's reserved areas so the reviewer sees what the player's thumbs/menu cover
+    size_name = next((k for k, v in SCREENS.items() if v == tuple(size)), "")
+    z = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    zd = ImageDraw.Draw(z)
+    for label, (zx, zy, zw, zh) in reserved_zones(size_name, size):
+        zd.rectangle([zx, zy, zx + zw, zy + zh], fill=(255, 60, 60, 40), outline=(255, 60, 60, 160), width=2)
+        zd.text((zx + 4, zy + 4), label, font=_font(12), fill=(255, 255, 255, 200))
+    img.alpha_composite(z)
     img.convert("RGB").save(out_path)
 
 
