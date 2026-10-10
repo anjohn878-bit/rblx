@@ -8,15 +8,18 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 function Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
 Step "Python"
-$py = $null
-foreach ($c in @("py -3.13", "py -3", "python")) {
-    try { & ([scriptblock]::Create("$c -c `"import sys; sys.exit(sys.version_info < (3, 10))`"")); if ($LASTEXITCODE -eq 0) { $py = $c; break } } catch {}
+# bpy (Blender as a Python module) only ships for specific Python versions - 3.13 is the safe one.
+$has313 = $false
+try { py -3.13 -c "pass" 2>$null; $has313 = ($LASTEXITCODE -eq 0) } catch {}
+if (-not $has313) {
+    Write-Host "Installing Python 3.13 (needed for Blender's bpy)..."
+    try { py install 3.13 } catch {}
+    try { py -3.13 -c "pass" 2>$null; $has313 = ($LASTEXITCODE -eq 0) } catch {}
+    if (-not $has313) {
+        winget install -e --id Python.Python.3.13 --accept-source-agreements --accept-package-agreements
+    }
 }
-if (-not $py) {
-    Write-Host "Python 3.13 not found - installing with winget..."
-    winget install -e --id Python.Python.3.13 --accept-source-agreements --accept-package-agreements
-    $py = "py -3.13"
-}
+$py = "py -3.13"
 Write-Host "Using: $py"
 
 Step "Rokit"
@@ -31,12 +34,15 @@ Step "Rojo Studio plugin"
 rojo plugin install
 
 Step "Python packages (bpy is ~400 MB, be patient)"
-& ([scriptblock]::Create("$py -m pip install --upgrade pip pytest pillow kaggle bpy"))
+& ([scriptblock]::Create("$py -m pip install --upgrade pip pytest pillow kaggle"))
+# Separate so a bpy failure can't block the other packages.
+& ([scriptblock]::Create("$py -m pip install bpy"))
+if ($LASTEXITCODE -ne 0) { Write-Host "bpy failed - install Blender from blender.org instead and tell Claude." -ForegroundColor Yellow }
 
 Step "Four checks"
 $bash = "C:\Program Files\Git\bin\bash.exe"
 if (Test-Path $bash) {
-    & $bash -lc "export PATH=`"`$HOME/.rokit/bin:`$PATH`"; scripts/check.sh"
+    & $bash -lc "export PATH=`"`$HOME/.rokit/bin:`$PATH`"; PYTHON='py -3.13' scripts/check.sh"
 } else {
     Write-Host "Git Bash not found - install Git (winget install Git.Git) and run scripts/check.sh in Git Bash." -ForegroundColor Yellow
 }

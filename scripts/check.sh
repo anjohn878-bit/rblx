@@ -6,11 +6,11 @@ mkdir -p build
 # Windows has "python"/"py", and "python3" may be a Microsoft Store stub.
 PY="${PYTHON:-}"
 if [ -z "$PY" ]; then
-  for c in python3 python "py -3"; do
-    if $c -c "import sys; sys.exit(sys.version_info < (3, 10))" >/dev/null 2>&1; then PY="$c"; break; fi
+  for c in "py -3.13" python3 python "py -3"; do
+    if $c -c "import sys, pytest; sys.exit(sys.version_info < (3, 10))" >/dev/null 2>&1; then PY="$c"; break; fi
   done
 fi
-[ -n "$PY" ] || { echo "Python 3.10+ not found"; exit 1; }
+[ -n "$PY" ] || { echo "No Python 3.10+ with pytest found (pip install pytest)"; exit 1; }
 echo "1/4 rojo build";  rojo build default.project.json -o build/game.rbxl >/dev/null
 echo "2/4 tests"
 lune run tests/run
