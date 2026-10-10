@@ -19,8 +19,8 @@ Manual way:
 2. Install the Rojo Studio plugin: `rojo plugin install`.
 3. Python 3.11+: `pip install pytest pillow kaggle`.
 4. Blender 4.2+ (add it to PATH), or `pip install bpy` with a matching Python version.
-5. Check: `scripts/check.sh` should print `ALL CHECKS PASSED`
-   (Windows: run it in Git Bash).
+5. Check: `scripts/check.sh` (Mac/Linux/Git Bash) or
+   `powershell -ExecutionPolicy Bypass -File scripts\check.ps1` (Windows) should print `ALL CHECKS PASSED`.
 
 ## 3. Connect Roblox Studio (MCP)
 1. Studio → Assistant → `⋯` → **Manage MCP servers** → enable **Studio MCP server**.

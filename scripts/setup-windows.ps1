@@ -40,11 +40,6 @@ Step "Python packages (bpy is ~400 MB, be patient)"
 if ($LASTEXITCODE -ne 0) { Write-Host "bpy failed - install Blender from blender.org instead and tell Claude." -ForegroundColor Yellow }
 
 Step "Four checks"
-$bash = "C:\Program Files\Git\bin\bash.exe"
-if (Test-Path $bash) {
-    & $bash -lc "export PATH=`"`$HOME/.rokit/bin:`$PATH`"; PYTHON='py -3.13' scripts/check.sh"
-} else {
-    Write-Host "Git Bash not found - install Git (winget install Git.Git) and run scripts/check.sh in Git Bash." -ForegroundColor Yellow
-}
+& powershell -ExecutionPolicy Bypass -File scripts\check.ps1
 
 Write-Host "`nDone. Next: open Studio, run 'rojo serve' here, click Rojo > Connect. Then SETUP.md section 3 (MCP)." -ForegroundColor Green
