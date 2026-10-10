@@ -8,6 +8,12 @@ Everything Studio-related has to run where Roblox Studio runs, i.e. your PC/Mac.
    The skills in `.claude/skills/` load automatically.
 
 ## 2. Roblox toolchain
+
+**Quick way:** from the repo folder run
+`powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1` (Windows) or
+`bash scripts/setup-mac.sh` (Mac). It does all of the steps below and runs the checks.
+
+Manual way:
 1. Install [Rokit](https://github.com/rojo-rbx/rokit), then in the repo run `rokit install`
    (installs the pinned Rojo, Selene, StyLua and Lune versions).
 2. Install the Rojo Studio plugin: `rojo plugin install`.
