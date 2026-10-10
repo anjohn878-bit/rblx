@@ -364,9 +364,14 @@ def build_luau(spec, screen, theme):
 # ---------------------------------------------------------------- CLI
 
 
+def spec_label(path):
+    # RULE: "/" on every OS, or Windows regenerates different files and the up-to-date test fails
+    return str(path).replace("\\", "/")
+
+
 def load(path):
     spec = json.loads(pathlib.Path(path).read_text())
-    spec["_path"] = str(path)
+    spec["_path"] = spec_label(path)
     theme = {**DEFAULT_THEME, **spec.get("theme", {})}
     return spec, theme
 

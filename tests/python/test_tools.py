@@ -76,3 +76,9 @@ def test_generated_ui_is_up_to_date(tmp_path):
             fresh.write_text(uikit.build_luau(spec, screen, theme))
             subprocess.run(["stylua", str(fresh)], check=True)
             assert fresh.read_text() == committed, f"rebuild UI: python -m tools.ui.uikit build {spec_path}"
+
+
+
+def test_spec_label_uses_forward_slashes():
+    # regression: Windows wrote specs\ui\hud.json into the generated header
+    assert uikit.spec_label("specs\\ui\\hud.json") == "specs/ui/hud.json"

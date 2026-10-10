@@ -61,3 +61,4 @@ template from those principles — never trace or copy another game's art, logos
 - Children render above parents in Sibling mode → depth layers are siblings inside a transparent container (`Depth.luau`).
 - A list that repositions a child must re-lay out that child's subtree (fixed in `layout_children`).
 - Pure scale-by-height makes phone buttons ~30 px; keep the 0.55 scale floor in BOTH `uikit.py` and `Depth.luau` (a test enforces they match).
+- Paths written into generated files use `/` (`as_posix`), otherwise Windows regenerates different files and the up-to-date test fails.
