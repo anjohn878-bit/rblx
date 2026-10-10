@@ -24,5 +24,5 @@ Start any "make a game" request with the **create-roblox-game** skill (`.claude/
 ## Environment notes
 - Studio MCP: prefer the official Roblox Studio MCP; fall back to the third-party one if it fails twice.
 - Cloud sessions (claude.ai/code) have no Studio: there, work offline (code, specs, checks, Blender, previews) and leave Studio steps for a desktop session.
-- Windows: run the gates with `powershell -ExecutionPolicy Bypass -File scripts\\check.ps1` (bash quoting through PowerShell breaks).
+- Windows: run the gates with `powershell -ExecutionPolicy Bypass -File scripts\check.ps1` (bash quoting through PowerShell breaks).
 - Tool path: `~/.local/bin` or rokit-managed (`rokit.toml`).
