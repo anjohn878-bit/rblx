@@ -1,0 +1,5 @@
+std = "roblox"
+exclude = ["tools/**/*.luau"]
+
+[rules]
+shadowing = "allow"

@@ -1,1 +1,11 @@
 *.lock
+build/
+out/
+__pycache__/
+*.pyc
+.env
+secrets/
+# Harvested third-party packs stay local (other people's work)
+library/vfx/packs/
+library/sound/raw/
+roblox.yml

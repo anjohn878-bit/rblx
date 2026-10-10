@@ -1,0 +1,48 @@
+# Fallback selene std for machines that can't reach setup.rbxcdn.com
+# (e.g. sandboxed cloud sessions). Types are loose; the real "roblox" std is
+# used automatically wherever it can be downloaded.
+---
+base: luau
+name: roblox_offline
+globals:
+  game: { any: true }
+  workspace: { any: true }
+  script: { any: true }
+  plugin: { any: true }
+  shared: { any: true }
+  Enum: { any: true }
+  Instance: { any: true }
+  task: { any: true }
+  tick: { any: true }
+  time: { any: true }
+  wait: { any: true }
+  delay: { any: true }
+  spawn: { any: true }
+  warn: { any: true }
+  settings: { any: true }
+  UserSettings: { any: true }
+  Axes: { any: true }
+  BrickColor: { any: true }
+  CFrame: { any: true }
+  Color3: { any: true }
+  ColorSequence: { any: true }
+  ColorSequenceKeypoint: { any: true }
+  DateTime: { any: true }
+  Faces: { any: true }
+  NumberRange: { any: true }
+  NumberSequence: { any: true }
+  NumberSequenceKeypoint: { any: true }
+  OverlapParams: { any: true }
+  PhysicalProperties: { any: true }
+  Random: { any: true }
+  Ray: { any: true }
+  RaycastParams: { any: true }
+  Rect: { any: true }
+  Region3: { any: true }
+  TweenInfo: { any: true }
+  UDim: { any: true }
+  UDim2: { any: true }
+  Vector2: { any: true }
+  Vector3: { any: true }
+  Font: { any: true }
+  Path2DControlPoint: { any: true }

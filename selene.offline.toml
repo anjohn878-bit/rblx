@@ -1,0 +1,5 @@
+std = "roblox_offline"
+exclude = ["tools/**/*.luau"]
+
+[rules]
+shadowing = "allow"
