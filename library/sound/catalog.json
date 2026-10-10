@@ -1,0 +1,4 @@
+{
+  "_note": "Filled from tools/studio/sound_harvest.luau. Each entry: id (rbxassetid), tags, length. Use names, never raw ids, in Config/Sounds.luau.",
+  "sounds": {}
+}

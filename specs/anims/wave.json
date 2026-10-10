@@ -1,0 +1,14 @@
+{
+  "name": "Wave",
+  "rig": "R15",
+  "length": 1.2,
+  "loop": true,
+  "priority": "Action",
+  "keys": [
+    { "t": 0.0, "ease": "Cubic", "pose": { "RightUpperArm": [0, 0, 150], "RightLowerArm": [20, 0, 0], "Head": [0, 0, -5] } },
+    { "t": 0.3, "ease": "Cubic", "pose": { "RightUpperArm": [0, 0, 165], "RightLowerArm": [20, 0, 35], "Head": [0, 0, -8] } },
+    { "t": 0.6, "ease": "Cubic", "pose": { "RightUpperArm": [0, 0, 150], "RightLowerArm": [20, 0, -25], "Head": [0, 0, -5] } },
+    { "t": 0.9, "ease": "Cubic", "pose": { "RightUpperArm": [0, 0, 165], "RightLowerArm": [20, 0, 35], "Head": [0, 0, -8] } },
+    { "t": 1.2, "ease": "Cubic", "pose": { "RightUpperArm": [0, 0, 150], "RightLowerArm": [20, 0, 0], "Head": [0, 0, -5] } }
+  ]
+}
