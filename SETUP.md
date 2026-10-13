@@ -39,9 +39,9 @@ Set these as environment variables in **your own terminal**, not in the chat.
 | `CLOUDFLARE_API_TOKEN` | My Profile → API Tokens → create one with the **Workers AI** permission. |
 | Kaggle | kaggle.com → Settings → API → *Create New Token* → put `kaggle.json` in `~/.kaggle/`. Phone-verify the account so notebooks can use the GPU and internet. |
 
-Windows (from the repo folder; input is hidden and not saved in history):
+Windows (from the repo folder): click the site's Copy button, then
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\set-secret.ps1 ROBLOX_API_KEY
+powershell -ExecutionPolicy Bypass -File scripts\set-secret.ps1 ROBLOX_API_KEY -FromClipboard
 powershell -ExecutionPolicy Bypass -File scripts\check-secrets.ps1   # shows which are set, never values
 ```
 macOS/Linux: add `export ROBLOX_API_KEY="..."` to `~/.zshrc` / `~/.bashrc`.
