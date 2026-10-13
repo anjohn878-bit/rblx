@@ -2,8 +2,8 @@
 
     python -m tools.model3d.kaggle_hi3dgen out/ref/chest.png [more.png ...] -o out/high
 
-Needs `pip install kaggle` and Kaggle credentials (~/.kaggle/kaggle.json or
-KAGGLE_USERNAME + KAGGLE_KEY). Phone-verify the Kaggle account once so GPU +
+Needs `pip install kaggle` and Kaggle credentials: ~/.kaggle/kaggle.json, or
+KAGGLE_USERNAME + KAGGLE_API_TOKEN (newer "KGAT_" tokens), or KAGGLE_USERNAME + KAGGLE_KEY. Phone-verify the Kaggle account once so GPU +
 internet are allowed in notebooks. Free tier: ~30 GPU hours/week.
 """
 import argparse
@@ -43,7 +43,7 @@ def username():
         return os.environ["KAGGLE_USERNAME"]
     cfg = pathlib.Path.home() / ".kaggle" / "kaggle.json"
     if not cfg.exists():
-        sys.exit("No Kaggle credentials. See SETUP.md (Kaggle).")
+        sys.exit("No Kaggle credentials: set KAGGLE_USERNAME (+ KAGGLE_API_TOKEN) or add ~/.kaggle/kaggle.json. See SETUP.md.")
     return json.loads(cfg.read_text())["username"]
 
 

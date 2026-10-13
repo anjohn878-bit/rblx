@@ -6,5 +6,9 @@ foreach ($n in $names) {
 }
 $kaggle = Join-Path $env:USERPROFILE ".kaggle\kaggle.json"
 if (Test-Path $kaggle) { Write-Host "OK      kaggle.json" -ForegroundColor Green }
+elseif ([Environment]::GetEnvironmentVariable("KAGGLE_API_TOKEN", "User") -and [Environment]::GetEnvironmentVariable("KAGGLE_USERNAME", "User")) {
+    Write-Host "OK      KAGGLE_USERNAME + KAGGLE_API_TOKEN" -ForegroundColor Green
+}
+elseif ([Environment]::GetEnvironmentVariable("KAGGLE_API_TOKEN", "User")) { Write-Host "MISSING KAGGLE_USERNAME (token is set)" -ForegroundColor Yellow }
 elseif ([Environment]::GetEnvironmentVariable("KAGGLE_KEY", "User")) { Write-Host "OK      KAGGLE_USERNAME/KAGGLE_KEY" -ForegroundColor Green }
-else { Write-Host "MISSING kaggle.json (or KAGGLE_USERNAME + KAGGLE_KEY)" -ForegroundColor Yellow }
+else { Write-Host "MISSING Kaggle (kaggle.json, or KAGGLE_USERNAME + KAGGLE_API_TOKEN)" -ForegroundColor Yellow }

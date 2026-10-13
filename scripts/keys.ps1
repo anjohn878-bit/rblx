@@ -47,14 +47,16 @@ $keys = @(
     @("ROBLOX_API_KEY", "Roblox: create.roblox.com > Open Cloud > API Keys > your key > Copy"),
     @("ROBLOX_USER_ID", "Roblox: the number in your profile link roblox.com/users/NUMBER/profile"),
     @("CLOUDFLARE_ACCOUNT_ID", "Cloudflare: dashboard > Workers AI > Account ID"),
-    @("CLOUDFLARE_API_TOKEN", "Cloudflare: My Profile > API Tokens > Workers AI token")
+    @("CLOUDFLARE_API_TOKEN", "Cloudflare: My Profile > API Tokens > Workers AI token"),
+    @("KAGGLE_USERNAME", "Kaggle: your username (shown on your profile page, kaggle.com/USERNAME)"),
+    @("KAGGLE_API_TOKEN", "Kaggle: Settings > API Tokens > Generate (starts with KGAT_). Skip if you used kaggle.json")
 )
 
 foreach ($k in $keys) {
     $name, $hint = $k
     $value = Ask $name $hint
     if (-not $value) { Write-Host "skipped  $name"; continue }
-    $min = if ($name -match "_ID$") { 3 } else { 20 }
+    $min = if ($name -match "_ID$|USERNAME") { 2 } else { 20 }
     if ($value.Length -lt $min -or $value -match "\s") {
         Write-Host "NOT saved $name - that doesn't look like a full key ($($value.Length) chars). Copy it again and re-run." -ForegroundColor Red
         continue
