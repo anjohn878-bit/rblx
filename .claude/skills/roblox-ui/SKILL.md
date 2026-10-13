@@ -64,3 +64,4 @@ template from those principles — never trace or copy another game's art, logos
 - Pure scale-by-height makes phone buttons ~30 px; keep the 0.55 scale floor in BOTH `uikit.py` and `Depth.luau` (a test enforces they match).
 - Paths written into generated files use `/` (`as_posix`), otherwise Windows regenerates different files and the up-to-date test fails.
 - Found in Studio: a HUD element at (24,24) hid under the Roblox menu buttons. Reserved zones are absolute px (Roblox's UI doesn't use our scale).
+- Flux icons come on a white square: `--preset icon` now cuts the background out automatically (`tools/imagegen/cutout.py`). Prompt ONE object + view ("single flat gold coin, front view"); vague prompts gave a ball on a pedestal.

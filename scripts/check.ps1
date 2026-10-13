@@ -14,10 +14,19 @@ function Gate($label, [scriptblock]$cmd) {
     }
 }
 
-$py = "py"
-$pyArgs = @("-3.13")
-& $py @pyArgs -c "import pytest" 2>$null
-if ($LASTEXITCODE -ne 0) { $py = "python"; $pyArgs = @() }
+# Python 3.13 is the one with bpy (Blender). `py` isn't always visible (e.g. inside Claude Code's
+# shell), so also look in the standard install folder before falling back to plain python.
+$py313 = Join-Path $env:LOCALAPPDATA "Python\pythoncore-3.13-64\python.exe"
+$py = "python"
+$pyArgs = @()
+if (Test-Path $py313) {
+    $py = $py313
+} elseif (Get-Command py -ErrorAction SilentlyContinue) {
+    $py = "py"
+    $pyArgs = @("-3.13")
+}
+& $py @pyArgs -m pytest --version *> $null
+if ($LASTEXITCODE -ne 0) { & $py @pyArgs -m pip install -q pytest pillow }
 
 Gate "1/4 rojo build" { rojo build default.project.json -o build/game.rbxl | Out-Null }
 Gate "2/4 tests (lune)" { lune run tests/run }

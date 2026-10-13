@@ -22,8 +22,10 @@ PRESETS = {
     "model3d": ", single object, centered, full object visible, three-quarter view, "
     "plain pure white background, soft even studio lighting, no shadow, no text",
     # Flat game UI icon - no emoji look, readable at 48px.
-    "icon": ", game UI icon, bold simple silhouette, thick dark outline, cel shaded, "
-    "centered, plain solid white background, no text, no border",
+    # RULE: name ONE object and its view ("single flat gold coin, front view") - vague prompts
+    # gave a ball on a pedestal. Background is removed automatically afterwards (cutout.py).
+    "icon": ", single object only, front view, game UI icon, bold simple silhouette, thick dark outline, "
+    "cel shaded, centered, fills the frame, plain solid white background, no pedestal, no shadow, no text, no border",
     "texture": ", seamless tileable texture, top-down, flat even lighting, stylized",
     "none": "",
 }
@@ -48,12 +50,21 @@ def main():
     ap.add_argument("--preset", choices=PRESETS, default="none")
     ap.add_argument("--steps", type=int, default=8)
     ap.add_argument("--seed", type=int)
+    ap.add_argument("--keep-background", action="store_true", help="icons: skip automatic background removal")
     a = ap.parse_args()
     full = a.prompt + PRESETS[a.preset]
     out = pathlib.Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     img = generate(full, a.steps, a.seed)
     out.write_bytes(img)
+    if a.preset == "icon" and not a.keep_background:
+        from PIL import Image
+
+        from tools.imagegen.cutout import cutout
+
+        icon, _ = cutout(Image.open(out))
+        out = out.with_suffix(".png")
+        icon.save(out)
     out.with_suffix(out.suffix + ".prompt.txt").write_text(full + (f"\nseed={a.seed}" if a.seed else "") + "\n")
     print(out)
 

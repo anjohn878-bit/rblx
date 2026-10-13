@@ -25,4 +25,8 @@ Start any "make a game" request with the **create-roblox-game** skill (`.claude/
 - Studio MCP: prefer the official Roblox Studio MCP; fall back to the third-party one if it fails twice.
 - Cloud sessions (claude.ai/code) have no Studio: there, work offline (code, specs, checks, Blender, previews) and leave Studio steps for a desktop session.
 - Windows: run the gates with `powershell -ExecutionPolicy Bypass -File scripts\check.ps1` (bash quoting through PowerShell breaks).
+- Windows Python: use Python **3.13** for every tool (it has `bpy`/Blender, pillow, pytest, kaggle):
+  `py -3.13 ...`, or if `py` isn't found, `$env:LOCALAPPDATA\Python\pythoncore-3.13-64\python.exe ...`.
+  Plain `python` may be 3.14, which has no `bpy` - don't install packages into it.
+- Studio: only play-test in the place connected to `rojo serve` (the Baseplate for this repo). If Studio has another game open, ask the user to switch; never sync this project into another game.
 - Tool path: `~/.local/bin` or rokit-managed (`rokit.toml`).

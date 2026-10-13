@@ -97,3 +97,19 @@ def test_modal_may_cover_thumb_controls_but_not_menu():
     problems = uikit.check_screen(modal, uikit.DEFAULT_THEME, "phone", (844, 390))
     assert any("Roblox menu" in p for p in problems)
     assert not any("thumbstick" in p or "jump" in p for p in problems)
+
+
+def test_icon_cutout_removes_border_background_but_keeps_inner_highlights():
+    # regression: Flux icons arrived on a white square that showed in-game
+    from PIL import Image, ImageDraw
+
+    from tools.imagegen.cutout import cutout
+
+    im = Image.new("RGB", (256, 256), (250, 250, 250))
+    d = ImageDraw.Draw(im)
+    d.ellipse([60, 60, 196, 196], fill=(230, 170, 30), outline=(60, 40, 10), width=6)
+    d.ellipse([100, 95, 125, 120], fill=(255, 255, 255))  # highlight inside the coin
+    out, _ = cutout(im, size=128)
+    alpha = out.split()[3]
+    assert alpha.getpixel((0, 0)) == 0
+    assert min(alpha.getpixel((x, y)) for x in range(40, 90, 4) for y in range(40, 90, 4)) == 255
