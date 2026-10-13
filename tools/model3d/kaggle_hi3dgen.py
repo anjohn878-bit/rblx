@@ -19,8 +19,20 @@ HERE = pathlib.Path(__file__).parent
 WORK = pathlib.Path("build/kaggle")
 
 
+def kaggle_exe():
+    """The kaggle CLI; on Windows pip puts it in Python's Scripts folder, which often isn't on PATH."""
+    found = shutil.which("kaggle")
+    if found:
+        return found
+    base = pathlib.Path(sys.executable).parent
+    for cand in (base / "Scripts" / "kaggle.exe", base / "kaggle.exe", base / "kaggle"):
+        if cand.exists():
+            return str(cand)
+    return None
+
+
 def kaggle(*args, check=True):
-    r = subprocess.run(["kaggle", *args], capture_output=True, text=True)
+    r = subprocess.run([kaggle_exe(), *args], capture_output=True, text=True)
     if check and r.returncode != 0:
         sys.exit(f"kaggle {' '.join(args)} failed:\n{r.stdout}\n{r.stderr}")
     return r
@@ -86,8 +98,8 @@ def main():
     ap.add_argument("images", nargs="+")
     ap.add_argument("-o", "--out", default="out/high")
     a = ap.parse_args()
-    if shutil.which("kaggle") is None:
-        sys.exit("Install the Kaggle CLI: pip install kaggle")
+    if kaggle_exe() is None:
+        sys.exit("Install the Kaggle CLI: py -3.13 -m pip install kaggle")
     user = username()
     dataset = push_inputs(user, a.images)
     time.sleep(20)  # dataset version must finish processing before the kernel mounts it
