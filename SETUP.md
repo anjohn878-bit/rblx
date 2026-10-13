@@ -39,7 +39,7 @@ Set these as environment variables in **your own terminal**, not in the chat.
 | `CLOUDFLARE_API_TOKEN` | My Profile → API Tokens → create one with the **Workers AI** permission. |
 | Kaggle | kaggle.com → Settings → API → *Create New Token* → put `kaggle.json` in `~/.kaggle/`. Phone-verify the account so notebooks can use the GPU and internet. |
 
-Windows, simplest: `powershell -ExecutionPolicy Bypass -File scripts\\keys.ps1` and paste each key into the pop-up box.
+Windows, simplest: `powershell -ExecutionPolicy Bypass -File scripts\keys.ps1` and paste each key into the pop-up box.
 
 Or one at a time: click the site's Copy button, then
 ```powershell
